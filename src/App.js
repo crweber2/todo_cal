@@ -1,5 +1,5 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { Clock, Plus, X, Check, Edit2, Calendar, ChevronLeft, ChevronRight, GripVertical, Repeat, FileText } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Clock, Plus, X, Check, Edit2, Calendar, ChevronLeft, ChevronRight, GripVertical, Repeat, FileText, ArrowUp } from 'lucide-react';
 
 const TodoCalendarApp = () => {
   // Initialize from localStorage if available
@@ -25,9 +25,9 @@ const TodoCalendarApp = () => {
   ]));
 
   const [meetings, setMeetings] = useState(() => loadFromStorage('todo-meetings', [
-    { id: 'm1', name: 'Client Meeting', weekOffset: 0, day: 0, startTime: 10, duration: 60, color: '#EF4444', notes: 'Discuss Q1 goals', recurring: false },
-    { id: 'm2', name: 'Team Sync', weekOffset: 0, day: 1, startTime: 14.25, duration: 30, color: '#EF4444', notes: '', recurring: true, seriesId: 'series1' },
-    { id: 'm3', name: 'Design Review', weekOffset: 0, day: 2, startTime: 11, duration: 90, color: '#EF4444', notes: 'Bring mockups', recurring: false },
+    { id: 'm1', name: 'Client Meeting', weekOffset: 0, day: 0, startTime: 10, duration: 60, color: '#374151', notes: 'Discuss Q1 goals', recurring: false },
+    { id: 'm2', name: 'Team Sync', weekOffset: 0, day: 1, startTime: 14.25, duration: 30, color: '#374151', notes: '', recurring: true, seriesId: 'series1' },
+    { id: 'm3', name: 'Design Review', weekOffset: 0, day: 2, startTime: 11, duration: 90, color: '#374151', notes: 'Bring mockups', recurring: false },
   ]));
 
   const [scheduledTasks, setScheduledTasks] = useState(() => loadFromStorage('todo-scheduledTasks', []));
@@ -323,8 +323,16 @@ const TodoCalendarApp = () => {
         setScheduledTasks(prev => prev.filter(t => 
           !(t.id === draggedItem.id && t.weekOffset === draggedItem.weekOffset)
         ));
-        setCompletedTasks(prev => [...prev, { ...task, completedAt: new Date() }]);
+        setCompletedTasks(prev => {
+          const exists = prev.some(t => t.id === task.id);
+          return exists ? prev : [...prev, { ...task, completedAt: new Date() }];
+        });
       }
+    } else if (draggedItem.source === 'unscheduled') {
+      setCompletedTasks(prev => {
+        const exists = prev.some(t => t.id === draggedItem.id);
+        return exists ? prev : [...prev, { ...draggedItem, completedAt: new Date() }];
+      });
     }
 
     setDraggedItem(null);
@@ -402,6 +410,57 @@ const TodoCalendarApp = () => {
     setCompletedTasks(prev => prev.filter(t => t.id !== taskId));
   };
 
+  const handleDeleteCompletedTask = (taskId) => {
+    // Permanently remove this task everywhere
+    setCompletedTasks(prev => prev.filter(t => t.id !== taskId));
+    setScheduledTasks(prev => prev.filter(t => t.id !== taskId));
+    setTasks(prev => prev.filter(t => t.id !== taskId));
+  };
+
+  const handleClearAllCompleted = () => {
+    // Permanently remove all completed tasks everywhere
+    const completedIds = new Set(completedTasks.map(t => t.id));
+    setTasks(prev => prev.filter(t => !completedIds.has(t.id)));
+    setScheduledTasks(prev => prev.filter(t => !completedIds.has(t.id)));
+    setCompletedTasks([]);
+  };
+
+  const handleCompleteFromEdit = () => {
+    if (editingItem && !editingItem.id.toString().startsWith('m')) {
+      // Complete task from edit modal
+      const task = scheduledTasks.find(t => t.id === editingItem.id && t.weekOffset === weekOffset) ||
+                   tasks.find(t => t.id === editingItem.id);
+      if (task) {
+        // Remove from scheduled or unscheduled
+        setScheduledTasks(prev => prev.filter(t => 
+          !(t.id === editingItem.id && t.weekOffset === weekOffset)
+        ));
+        setCompletedTasks(prev => [...prev, { ...editingItem, completedAt: new Date() }]);
+      }
+      setEditingItem(null);
+    }
+  };
+
+  const handleDeleteFromEdit = () => {
+    if (editingItem) {
+      if (editingItem.id.toString().startsWith('m')) {
+        // Delete meeting
+        if (editingItem.recurring) {
+          setDeleteConfirm(editingItem);
+        } else {
+          setMeetings(prev => prev.filter(m => m.id !== editingItem.id));
+          setEditingItem(null);
+        }
+      } else {
+        // Delete task
+        setTasks(prev => prev.filter(t => t.id !== editingItem.id));
+        setScheduledTasks(prev => prev.filter(t => t.id !== editingItem.id));
+        setCompletedTasks(prev => prev.filter(t => t.id !== editingItem.id));
+        setEditingItem(null);
+      }
+    }
+  };
+
   const handleEditItem = (item) => {
     setEditingItem(item);
   };
@@ -447,7 +506,7 @@ const TodoCalendarApp = () => {
         id: `m${Date.now()}`,
         ...newMeeting,
         weekOffset,
-        color: '#EF4444'
+        color: '#374151'
       };
       
       if (newMeeting.recurring) {
@@ -499,7 +558,7 @@ const TodoCalendarApp = () => {
 
   return (
     <div className="h-screen bg-gray-50 p-4 flex flex-col">
-      <div className="w-full mx-auto flex-1 flex flex-col">
+      <div className="w-full mx-auto flex-1 flex flex-col min-h-0">
         <h1 className="text-3xl font-bold text-gray-800 mb-4">Task Scheduler</h1>
         
         {/* Status Bar */}
@@ -522,11 +581,11 @@ const TodoCalendarApp = () => {
           </div>
         </div>
 
-        <div className="grid grid-cols-12 gap-6 flex-1 overflow-hidden">
+        <div className="grid grid-cols-12 gap-6 flex-1 min-h-0">
           {/* Left Sidebar - Unscheduled Tasks */}
-          <div className="col-span-3 flex flex-col gap-4">
+          <div className="col-span-3 flex flex-col gap-4 min-h-0">
             <div 
-              className="bg-white rounded-lg shadow-md p-4 flex-1 overflow-auto"
+              className="bg-white rounded-lg shadow-md p-4 flex-1 flex flex-col min-h-0"
               onDragOver={handleDragOver}
               onDrop={handleDropToUnscheduled}
             >
@@ -539,7 +598,10 @@ const TodoCalendarApp = () => {
                   <Plus className="w-4 h-4" />
                 </button>
               </div>
-              <div className="space-y-2 min-h-[100px]">
+              <div className="flex-1 overflow-y-auto space-y-2 min-h-[100px] pr-2"
+                   onDragOver={handleDragOver}
+                   onDrop={handleDropToUnscheduled}
+              >
                 {tasks.filter(task => !scheduledTasks.find(st => st.id === task.id) && !completedTasks.find(ct => ct.id === task.id)).map(task => (
                   <div
                     key={task.id}
@@ -576,18 +638,27 @@ const TodoCalendarApp = () => {
 
             {/* Completed Tasks */}
             <div 
-              className="bg-white rounded-lg shadow-md p-4 max-h-64"
+              className="bg-white rounded-lg shadow-md p-4 max-h-64 flex flex-col"
               onDragOver={handleDragOver}
               onDrop={handleDropToCompleted}
             >
-              <h2 className="text-xl font-semibold text-gray-700 mb-4">Completed</h2>
-              <div className="space-y-2 overflow-y-auto min-h-[100px]">
+              <div className="flex justify-between items-center mb-4">
+                <h2 className="text-xl font-semibold text-gray-700">Completed</h2>
+                {completedTasks.length > 0 && (
+                  <button
+                    onClick={handleClearAllCompleted}
+                    className="p-2 bg-red-500 text-white rounded-lg hover:bg-red-600"
+                    title="Clear all completed tasks"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+              <div className="flex-1 overflow-y-auto space-y-2">
                 {completedTasks.map(task => (
                   <div
                     key={task.id}
-                    draggable
-                    onDragStart={(e) => handleDragStart(e, task, 'completed')}
-                    className="p-3 rounded-lg cursor-move opacity-60 hover:opacity-100"
+                    className="p-3 rounded-lg opacity-60 hover:opacity-100 cursor-default"
                     style={{ backgroundColor: '#E5E7EB' }}
                   >
                     <div className="flex justify-between items-center">
@@ -595,12 +666,28 @@ const TodoCalendarApp = () => {
                         <div className="font-medium text-gray-700 line-through">{task.name}</div>
                         <div className="text-sm text-gray-500">{task.duration} min</div>
                       </div>
-                      <button
-                        onClick={() => handleUncompleteTask(task.id)}
-                        className="p-1 hover:bg-gray-300 rounded"
-                      >
-                        <X className="w-3 h-3" />
-                      </button>
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleUncompleteTask(task.id);
+                          }}
+                          className="p-1 hover:bg-blue-200 rounded text-blue-600 hover:text-blue-800"
+                          title="Move back to Tasks"
+                        >
+                          <ArrowUp className="w-3 h-3" />
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeleteCompletedTask(task.id);
+                          }}
+                          className="p-1 hover:bg-red-200 rounded text-red-600 hover:text-red-800"
+                          title="Delete permanently"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
                     </div>
                   </div>
                 ))}
@@ -850,19 +937,55 @@ const TodoCalendarApp = () => {
                 className="w-full p-2 border rounded mb-4 h-24"
                 placeholder="Add notes..."
               />
-              <div className="flex justify-end gap-2">
-                <button
-                  onClick={() => setEditingItem(null)}
-                  className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleSaveEdit}
-                  className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
-                >
-                  Save
-                </button>
+              {!editingItem.id.toString().startsWith('m') && (
+                <>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Color</label>
+                  <div className="flex gap-2 mb-4">
+                    {['#3B82F6', '#10B981', '#F59E0B', '#8B5CF6', '#EC4899', '#EF4444', '#6B7280', '#14B8A6'].map(color => (
+                      <button
+                        key={color}
+                        onClick={() => setEditingItem({ ...editingItem, color })}
+                        className={`w-8 h-8 rounded-full border-2 ${editingItem.color === color ? 'border-gray-800' : 'border-gray-300'}`}
+                        style={{ backgroundColor: color }}
+                        title={`Select ${color}`}
+                      />
+                    ))}
+                  </div>
+                </>
+              )}
+              <div className="flex justify-between">
+                <div className="flex gap-2">
+                  {!editingItem.id.toString().startsWith('m') && (
+                    <button
+                      onClick={handleCompleteFromEdit}
+                      className="p-2 bg-green-500 text-white rounded hover:bg-green-600"
+                      title="Complete"
+                    >
+                      <Check className="w-4 h-4" />
+                    </button>
+                  )}
+                  <button
+                    onClick={handleDeleteFromEdit}
+                    className="p-2 bg-red-500 text-white rounded hover:bg-red-600"
+                    title="Delete"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setEditingItem(null)}
+                    className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleSaveEdit}
+                    className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
+                  >
+                    Save
+                  </button>
+                </div>
               </div>
             </div>
           </div>
