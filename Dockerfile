@@ -6,9 +6,7 @@ WORKDIR /app
 
 # Install deps using lockfile for reproducibility
 COPY package*.json ./
-# Upgrade npm to a recent stable major to avoid CI issues in Alpine images
-RUN npm i -g npm@11 && npm --version
-# Prefer clean reproducible install if lockfile exists; fall back to install
+# Install dependencies (use npm ci if lockfile exists; fallback to npm install)
 RUN if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm install --no-audit --no-fund; fi
 
 # Build the app
