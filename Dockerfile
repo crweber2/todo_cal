@@ -6,8 +6,8 @@ WORKDIR /app
 
 # Install deps using lockfile for reproducibility
 COPY package*.json ./
-# Install dependencies (use npm ci if lockfile exists; fallback to npm install)
-RUN if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm install --no-audit --no-fund; fi
+# Install dependencies with npm install to tolerate lockfile drift on CI/builders
+RUN npm install --no-audit --no-fund
 
 # Build the app
 COPY . .
