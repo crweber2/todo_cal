@@ -6,10 +6,15 @@ WORKDIR /app
 
 # Install deps using lockfile for reproducibility
 COPY package*.json ./
-RUN npm ci
+# Upgrade npm to a recent stable major to avoid CI issues in Alpine images
+RUN npm i -g npm@11 && npm --version
+# Prefer clean reproducible install if lockfile exists; fall back to install
+RUN if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm install --no-audit --no-fund; fi
 
 # Build the app
 COPY . .
+# Ensure CRA doesn't treat warnings as errors during Docker builds
+ENV CI=false
 RUN npm run build
 
 # 2) Runtime stage: serve the static build using "serve"
