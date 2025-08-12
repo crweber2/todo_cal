@@ -559,7 +559,6 @@ const TodoCalendarApp = () => {
   return (
     <div className="h-screen bg-gray-50 p-4 flex flex-col">
       <div className="w-full mx-auto flex-1 flex flex-col min-h-0">
-        <h1 className="text-3xl font-bold text-gray-800 mb-4">Task Scheduler</h1>
         
         {/* Status Bar */}
         <div className="bg-white rounded-lg shadow-md p-4 mb-4">
