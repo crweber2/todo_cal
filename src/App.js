@@ -1,11 +1,11 @@
-import React, { useState, useEffect } from 'react';
-import { Clock, Plus, X, Check, Edit2, Calendar, ChevronLeft, ChevronRight, GripVertical, Repeat, FileText, ArrowUp, Share2, Eye, EyeOff } from 'lucide-react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Clock, Plus, X, Check, Edit2, Calendar, ChevronLeft, ChevronRight, GripVertical, Repeat, FileText, ArrowUp, Share2, Eye, Zap } from 'lucide-react';
 
 const TodoCalendarApp = () => {
   // Calendar sync state
   const [calendarId, setCalendarId] = useState(null);
   const [isOnline, setIsOnline] = useState(true);
-  const [lastSaved, setLastSaved] = useState(null);
+  const [, setLastSaved] = useState(null);
   const [saveStatus, setSaveStatus] = useState('saved'); // 'saving', 'saved', 'error'
 
   // View state
@@ -45,6 +45,7 @@ const TodoCalendarApp = () => {
   const [cancelledInstances, setCancelledInstances] = useState(() => new Set(loadFromStorage('todo-cancelledInstances', [])));
 
   const [draggedItem, setDraggedItem] = useState(null);
+  const [draggedTaskIndex, setDraggedTaskIndex] = useState(null);
   const [currentTime, setCurrentTime] = useState(new Date());
   const [editingItem, setEditingItem] = useState(null);
   const [showTaskModal, setShowTaskModal] = useState(false);
@@ -85,7 +86,7 @@ const TodoCalendarApp = () => {
     }
   };
 
-  const saveCalendarToServer = async () => {
+  const saveCalendarToServer = useCallback(async () => {
     if (!calendarId) return;
     
     try {
@@ -117,47 +118,8 @@ const TodoCalendarApp = () => {
       setSaveStatus('error');
       setIsOnline(false);
     }
-  };
+  }, [calendarId, tasks, meetings, scheduledTasks, completedTasks, cancelledInstances]);
 
-  const createNewCalendar = async () => {
-    try {
-      // Send current data when creating new calendar
-      const currentData = {
-        tasks,
-        meetings,
-        scheduledTasks,
-        completedTasks,
-        cancelledInstances: Array.from(cancelledInstances)
-      };
-      
-      const response = await fetch('/api/calendar/new', { 
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(currentData)
-      });
-      
-      if (response.ok) {
-        const result = await response.json();
-        const newId = result.id;
-        
-        if (newId) {
-          setCalendarId(newId);
-          
-          // Update URL
-          const newUrl = `${window.location.origin}${window.location.pathname}?id=${newId}`;
-          window.history.pushState({}, '', newUrl);
-          
-          setShowShareModal(true);
-        } else {
-          console.error('No ID returned from server');
-        }
-      } else {
-        console.error('Failed to create calendar:', response.status);
-      }
-    } catch (error) {
-      console.error('Failed to create new calendar:', error);
-    }
-  };
 
   // Auto-save to server when data changes
   useEffect(() => {
@@ -168,7 +130,7 @@ const TodoCalendarApp = () => {
       
       return () => clearTimeout(timeoutId);
     }
-  }, [tasks, meetings, scheduledTasks, completedTasks, cancelledInstances, calendarId]);
+  }, [tasks, meetings, scheduledTasks, completedTasks, cancelledInstances, calendarId, saveCalendarToServer]);
 
   // Save to localStorage whenever data changes (backup)
   useEffect(() => {
@@ -337,6 +299,9 @@ const TodoCalendarApp = () => {
     return visible;
   };
 
+  // Increased pixels per hour for better visibility of short tasks
+  const pixelsPerHour = viewMode === 'day' ? 120 : 80; // Day view: 120px/hour, Week view: 80px/hour
+
   const { currentTasks, nextTask, timeRemaining } = getCurrentAndNextTask();
 
   // Calculate overlapping items for side-by-side display
@@ -353,8 +318,6 @@ const TodoCalendarApp = () => {
     let currentGroup = [];
 
     dayItems.forEach(item => {
-      const itemEnd = item.startTime + item.duration / 60;
-      
       if (currentGroup.length === 0) {
         currentGroup.push(item);
       } else {
@@ -525,7 +488,7 @@ const TodoCalendarApp = () => {
         document.removeEventListener('mouseup', handleMouseUp);
       };
     }
-  }, [resizingItem]);
+  }, [resizingItem, pixelsPerHour]);
 
   const handleCompleteTask = (taskId) => {
     const task = scheduledTasks.find(t => t.id === taskId && t.weekOffset === weekOffset);
@@ -692,8 +655,126 @@ const TodoCalendarApp = () => {
     }
   };
 
-  // Increased pixels per hour for better visibility of short tasks
-  const pixelsPerHour = viewMode === 'day' ? 120 : 80; // Day view: 120px/hour, Week view: 80px/hour
+  // Fill tasks starting from current time
+  const handleFillTasks = () => {
+    const unscheduledTasks = tasks.filter(task => 
+      !scheduledTasks.find(st => st.id === task.id) && 
+      !completedTasks.find(ct => ct.id === task.id)
+    );
+
+    if (unscheduledTasks.length === 0) return;
+
+    // Get current time and day
+    const now = currentTime;
+    const currentDay = now.getDay() - 1; // 0 = Monday
+    const currentHour = now.getHours() + now.getMinutes() / 60;
+    
+    // Only fill for current week
+    if (weekOffset !== 0) return;
+
+    // Get all existing scheduled items for the current week
+    const existingItems = [
+      ...scheduledTasks.filter(t => t.weekOffset === weekOffset),
+      ...getVisibleMeetings()
+    ];
+
+    // Create time slots (15-minute intervals from 9 AM to 5 PM)
+    const timeSlots = [];
+    for (let day = Math.max(0, currentDay); day < 5; day++) {
+      const startHour = day === currentDay ? Math.max(9, currentHour) : 9;
+      for (let hour = startHour; hour < 17; hour += 0.25) {
+        timeSlots.push({ day, time: hour });
+      }
+    }
+
+    // Function to check if a time slot is available
+    const isSlotAvailable = (day, startTime, duration) => {
+      const endTime = startTime + duration / 60;
+      
+      return !existingItems.some(item => {
+        if (item.day !== day) return false;
+        const itemEnd = item.startTime + item.duration / 60;
+        return (startTime < itemEnd && endTime > item.startTime);
+      });
+    };
+
+    // Schedule tasks one by one
+    const newScheduledTasks = [];
+    
+    for (const task of unscheduledTasks) {
+      let scheduled = false;
+      
+      // Find the first available slot that fits this task
+      for (const slot of timeSlots) {
+        const durationInHours = task.duration / 60;
+        
+        // Check if task fits in this slot and doesn't conflict
+        if (slot.time + durationInHours <= 17 && 
+            isSlotAvailable(slot.day, slot.time, task.duration)) {
+          
+          const scheduledTask = {
+            ...task,
+            day: slot.day,
+            startTime: slot.time,
+            weekOffset
+          };
+          
+          newScheduledTasks.push(scheduledTask);
+          existingItems.push(scheduledTask); // Add to existing items to avoid conflicts
+          scheduled = true;
+          break;
+        }
+      }
+      
+      if (!scheduled) {
+        console.log(`Could not schedule task: ${task.name}`);
+      }
+    }
+
+    // Update scheduled tasks
+    if (newScheduledTasks.length > 0) {
+      setScheduledTasks(prev => [...prev, ...newScheduledTasks]);
+    }
+  };
+
+  // Task reordering handlers
+  const handleTaskDragOver = (e) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+  };
+
+  const handleTaskDrop = (e, dropIndex) => {
+    e.preventDefault();
+    if (draggedTaskIndex === null) return;
+
+    const unscheduledTasks = tasks.filter(task => 
+      !scheduledTasks.find(st => st.id === task.id) && 
+      !completedTasks.find(ct => ct.id === task.id)
+    );
+
+    if (draggedTaskIndex === dropIndex) {
+      setDraggedTaskIndex(null);
+      return;
+    }
+
+    const draggedTask = unscheduledTasks[draggedTaskIndex];
+    const newTasks = [...tasks];
+    
+    // Find the actual indices in the full tasks array
+    const draggedTaskId = draggedTask.id;
+    const dropTaskId = unscheduledTasks[dropIndex].id;
+    
+    const draggedIndex = newTasks.findIndex(t => t.id === draggedTaskId);
+    const dropIndexInFull = newTasks.findIndex(t => t.id === dropTaskId);
+    
+    // Remove dragged task and insert at new position
+    const [removed] = newTasks.splice(draggedIndex, 1);
+    newTasks.splice(dropIndexInFull, 0, removed);
+    
+    setTasks(newTasks);
+    setDraggedTaskIndex(null);
+  };
+
   const currentTimePos = getCurrentTimePosition();
 
   // Day view navigation
@@ -763,24 +844,39 @@ const TodoCalendarApp = () => {
             >
               <div className="flex justify-between items-center mb-4">
                 <h2 className="text-xl font-semibold text-gray-700">Tasks</h2>
-                <button
-                  onClick={() => setShowTaskModal(true)}
-                  className="p-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600"
-                >
-                  <Plus className="w-4 h-4" />
-                </button>
+                <div className="flex gap-2">
+                  <button
+                    onClick={handleFillTasks}
+                    className="p-2 bg-green-500 text-white rounded-lg hover:bg-green-600"
+                    title="Fill calendar with tasks starting from current time"
+                  >
+                    <Zap className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={() => setShowTaskModal(true)}
+                    className="p-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600"
+                  >
+                    <Plus className="w-4 h-4" />
+                  </button>
+                </div>
               </div>
               <div className="flex-1 overflow-y-auto space-y-2 min-h-[100px] pr-2"
-                   onDragOver={handleDragOver}
+                   onDragOver={handleTaskDragOver}
                    onDrop={handleDropToUnscheduled}
               >
-                {tasks.filter(task => !scheduledTasks.find(st => st.id === task.id) && !completedTasks.find(ct => ct.id === task.id)).map(task => (
+                {tasks.filter(task => !scheduledTasks.find(st => st.id === task.id) && !completedTasks.find(ct => ct.id === task.id)).map((task, index) => (
                   <div
                     key={task.id}
                     draggable
-                    onDragStart={(e) => handleDragStart(e, task, 'unscheduled')}
+                    onDragStart={(e) => {
+                      // Set both drag types - let drop handlers determine which to use
+                      setDraggedTaskIndex(index);
+                      handleDragStart(e, task, 'unscheduled');
+                    }}
+                    onDragOver={handleTaskDragOver}
+                    onDrop={(e) => handleTaskDrop(e, index)}
                     onDoubleClick={() => handleEditItem(task)}
-                    className="p-3 rounded-lg cursor-move hover:shadow-lg transition-shadow"
+                    className="p-3 rounded-lg hover:shadow-lg transition-shadow cursor-move"
                     style={{ backgroundColor: task.color + '20', borderLeft: `4px solid ${task.color}` }}
                   >
                     <div className="flex justify-between items-start">

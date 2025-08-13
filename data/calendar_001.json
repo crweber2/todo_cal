@@ -6,6 +6,34 @@
       "duration": 30,
       "notes": "",
       "color": "#48e0e3"
+    },
+    {
+      "id": 1755062485377,
+      "name": "Task1",
+      "duration": 30,
+      "notes": "",
+      "color": "#F97316"
+    },
+    {
+      "id": 1755062490607,
+      "name": "task2",
+      "duration": 60,
+      "notes": "",
+      "color": "#84CC16"
+    },
+    {
+      "id": 1755062496642,
+      "name": "Task3",
+      "duration": 15,
+      "notes": "",
+      "color": "#6B7280"
+    },
+    {
+      "id": 1755062569779,
+      "name": "Task4",
+      "duration": 60,
+      "notes": "",
+      "color": "#8B5CF6"
     }
   ],
   "meetings": [
@@ -44,9 +72,36 @@
       "weekOffset": 0,
       "column": 0,
       "totalColumns": 1
+    },
+    {
+      "id": 1755062485377,
+      "name": "Task1",
+      "duration": 30,
+      "notes": "",
+      "color": "#F97316",
+      "day": 0,
+      "startTime": 8.25,
+      "weekOffset": 0,
+      "column": 0,
+      "totalColumns": 1
     }
   ],
-  "completedTasks": [],
+  "completedTasks": [
+    {
+      "id": 1755062569779,
+      "name": "Task4",
+      "duration": 60,
+      "notes": "",
+      "color": "#8B5CF6",
+      "day": 2,
+      "startTime": 11,
+      "weekOffset": 0,
+      "column": 0,
+      "totalColumns": 1,
+      "source": "scheduled",
+      "completedAt": "2025-08-13T05:23:11.794Z"
+    }
+  ],
   "cancelledInstances": [],
-  "lastModified": "2025-08-13T04:57:06.629Z"
+  "lastModified": "2025-08-13T05:32:34.087Z"
 }
