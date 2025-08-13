@@ -1,8 +1,18 @@
 import React, { useState, useEffect } from 'react';
-import { Clock, Plus, X, Check, Edit2, Calendar, ChevronLeft, ChevronRight, GripVertical, Repeat, FileText, ArrowUp } from 'lucide-react';
+import { Clock, Plus, X, Check, Edit2, Calendar, ChevronLeft, ChevronRight, GripVertical, Repeat, FileText, ArrowUp, Share2, Eye, EyeOff } from 'lucide-react';
 
 const TodoCalendarApp = () => {
-  // Initialize from localStorage if available
+  // Calendar sync state
+  const [calendarId, setCalendarId] = useState(null);
+  const [isOnline, setIsOnline] = useState(true);
+  const [lastSaved, setLastSaved] = useState(null);
+  const [saveStatus, setSaveStatus] = useState('saved'); // 'saving', 'saved', 'error'
+
+  // View state
+  const [viewMode, setViewMode] = useState('week'); // 'day' or 'week'
+  const [selectedDay, setSelectedDay] = useState(0); // For day view
+
+  // Initialize from localStorage or server
   const loadFromStorage = (key, defaultValue) => {
     if (typeof window !== 'undefined') {
       try {
@@ -39,6 +49,7 @@ const TodoCalendarApp = () => {
   const [editingItem, setEditingItem] = useState(null);
   const [showTaskModal, setShowTaskModal] = useState(false);
   const [showMeetingModal, setShowMeetingModal] = useState(false);
+  const [showShareModal, setShowShareModal] = useState(false);
   const [newTask, setNewTask] = useState({ name: '', duration: 30, notes: '' });
   const [newMeeting, setNewMeeting] = useState({ name: '', day: 0, startTime: 9, duration: 60, notes: '', recurring: false });
   const [weekOffset, setWeekOffset] = useState(0);
@@ -46,7 +57,120 @@ const TodoCalendarApp = () => {
   const [quickMeetingPos, setQuickMeetingPos] = useState(null);
   const [deleteConfirm, setDeleteConfirm] = useState(null);
 
-  // Save to localStorage whenever data changes
+  // Check for calendar ID in URL on load, default to "001"
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const id = urlParams.get('id') || '001';
+    setCalendarId(id);
+    loadCalendarFromServer(id);
+  }, []);
+
+  // Server sync functions
+  const loadCalendarFromServer = async (id) => {
+    try {
+      const response = await fetch(`/api/calendar/${id}`);
+      if (response.ok) {
+        const data = await response.json();
+        setTasks(data.tasks || []);
+        setMeetings(data.meetings || []);
+        setScheduledTasks(data.scheduledTasks || []);
+        setCompletedTasks(data.completedTasks || []);
+        setCancelledInstances(new Set(data.cancelledInstances || []));
+        setLastSaved(data.lastModified);
+        setIsOnline(true);
+      }
+    } catch (error) {
+      console.error('Failed to load calendar from server:', error);
+      setIsOnline(false);
+    }
+  };
+
+  const saveCalendarToServer = async () => {
+    if (!calendarId) return;
+    
+    try {
+      setSaveStatus('saving');
+      const data = {
+        tasks,
+        meetings,
+        scheduledTasks,
+        completedTasks,
+        cancelledInstances: Array.from(cancelledInstances)
+      };
+      
+      const response = await fetch(`/api/calendar/${calendarId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data)
+      });
+      
+      if (response.ok) {
+        const result = await response.json();
+        setLastSaved(result.lastModified);
+        setSaveStatus('saved');
+        setIsOnline(true);
+      } else {
+        setSaveStatus('error');
+      }
+    } catch (error) {
+      console.error('Failed to save calendar to server:', error);
+      setSaveStatus('error');
+      setIsOnline(false);
+    }
+  };
+
+  const createNewCalendar = async () => {
+    try {
+      // Send current data when creating new calendar
+      const currentData = {
+        tasks,
+        meetings,
+        scheduledTasks,
+        completedTasks,
+        cancelledInstances: Array.from(cancelledInstances)
+      };
+      
+      const response = await fetch('/api/calendar/new', { 
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(currentData)
+      });
+      
+      if (response.ok) {
+        const result = await response.json();
+        const newId = result.id;
+        
+        if (newId) {
+          setCalendarId(newId);
+          
+          // Update URL
+          const newUrl = `${window.location.origin}${window.location.pathname}?id=${newId}`;
+          window.history.pushState({}, '', newUrl);
+          
+          setShowShareModal(true);
+        } else {
+          console.error('No ID returned from server');
+        }
+      } else {
+        console.error('Failed to create calendar:', response.status);
+      }
+    } catch (error) {
+      console.error('Failed to create new calendar:', error);
+    }
+  };
+
+  // Auto-save to server when data changes
+  useEffect(() => {
+    if (calendarId) {
+      const timeoutId = setTimeout(() => {
+        saveCalendarToServer();
+      }, 2000); // Save 2 seconds after last change
+      
+      return () => clearTimeout(timeoutId);
+    }
+  }, [tasks, meetings, scheduledTasks, completedTasks, cancelledInstances, calendarId]);
+
+  // Save to localStorage whenever data changes (backup)
   useEffect(() => {
     if (typeof window !== 'undefined') {
       try {
@@ -120,7 +244,8 @@ const TodoCalendarApp = () => {
 
   const weekDates = getWeekDates();
   const dayNames = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
-  const hours = Array.from({ length: 10 }, (_, i) => i + 8); // 8 AM to 5 PM
+  const hours = Array.from({ length: 14 }, (_, i) => i + 6); // 6 AM to 7 PM for day view
+  const weekHours = Array.from({ length: 10 }, (_, i) => i + 8); // 8 AM to 5 PM for week view
 
   // Convert time to 15-minute slots
   const timeToSlot = (time) => Math.floor(time * 4) / 4;
@@ -138,16 +263,21 @@ const TodoCalendarApp = () => {
     const currentDay = now.getDay() - 1; // 0 = Monday
     const currentHour = now.getHours() + now.getMinutes() / 60;
     
-    if (weekOffset === 0 && currentDay >= 0 && currentDay < 5 && currentHour >= 8 && currentHour <= 18) {
-      return {
-        day: currentDay,
-        position: (currentHour - 8) * pixelsPerHour
-      };
+    if (weekOffset === 0 && currentDay >= 0 && currentDay < 5) {
+      const minHour = viewMode === 'day' ? 6 : 8;
+      const maxHour = viewMode === 'day' ? 20 : 18;
+      
+      if (currentHour >= minHour && currentHour <= maxHour) {
+        return {
+          day: currentDay,
+          position: (currentHour - minHour) * pixelsPerHour
+        };
+      }
     }
     return null;
   };
 
-  // Get current and next task
+  // Get current and next task with countdown
   const getCurrentAndNextTask = () => {
     const now = currentTime;
     const currentDay = now.getDay() - 1; // 0 = Monday
@@ -155,6 +285,7 @@ const TodoCalendarApp = () => {
     
     let currentTasks = [];
     let nextTask = null;
+    let timeRemaining = null;
     
     const currentWeekTasks = scheduledTasks.filter(t => t.weekOffset === weekOffset);
     const currentWeekMeetings = getVisibleMeetings();
@@ -169,6 +300,12 @@ const TodoCalendarApp = () => {
       
       if (weekOffset === 0 && task.day === currentDay && task.startTime <= currentHour && taskEndTime > currentHour) {
         currentTasks.push(task);
+        // Calculate time remaining for the first current task
+        if (currentTasks.length === 1) {
+          const remainingHours = taskEndTime - currentHour;
+          const remainingMinutes = Math.ceil(remainingHours * 60);
+          timeRemaining = remainingMinutes;
+        }
       } else if (weekOffset === 0 && (task.day > currentDay || (task.day === currentDay && task.startTime > currentHour))) {
         if (!nextTask) nextTask = task;
       } else if (weekOffset > 0 && !nextTask) {
@@ -176,7 +313,7 @@ const TodoCalendarApp = () => {
       }
     }
     
-    return { currentTasks, nextTask };
+    return { currentTasks, nextTask, timeRemaining };
   };
 
   // Get meetings for current week (including recurring)
@@ -200,7 +337,7 @@ const TodoCalendarApp = () => {
     return visible;
   };
 
-  const { currentTasks, nextTask } = getCurrentAndNextTask();
+  const { currentTasks, nextTask, timeRemaining } = getCurrentAndNextTask();
 
   // Calculate overlapping items for side-by-side display
   const getOverlappingItems = (day) => {
@@ -262,7 +399,7 @@ const TodoCalendarApp = () => {
 
     const rect = e.currentTarget.getBoundingClientRect();
     const y = e.clientY - rect.top;
-    const quarterHour = Math.floor(y / 15) * 0.25;
+    const quarterHour = Math.floor(y / (pixelsPerHour / 4)) * 0.25;
     const startTime = timeToSlot(hour + quarterHour);
 
     const newScheduledItem = {
@@ -341,7 +478,7 @@ const TodoCalendarApp = () => {
   const handleDoubleClickCalendar = (e, day, hour) => {
     const rect = e.currentTarget.getBoundingClientRect();
     const y = e.clientY - rect.top;
-    const quarterHour = Math.floor(y / 15) * 0.25;
+    const quarterHour = Math.floor(y / (pixelsPerHour / 4)) * 0.25;
     const startTime = timeToSlot(hour + quarterHour);
     
     setQuickMeetingPos({ day, startTime });
@@ -359,7 +496,7 @@ const TodoCalendarApp = () => {
     const handleMouseMove = (e) => {
       if (resizingItem) {
         const deltaY = e.clientY - resizingItem.startY;
-        const durationChange = Math.round(deltaY / 15) * 15;
+        const durationChange = Math.round(deltaY / (pixelsPerHour / 4)) * 15;
         const newDuration = Math.max(15, resizingItem.originalDuration + durationChange);
         
         if (resizingItem.type === 'task') {
@@ -487,12 +624,14 @@ const TodoCalendarApp = () => {
 
   const handleAddTask = () => {
     if (newTask.name && newTask.duration > 0) {
+      // Predefined colors to avoid white/light colors
+      const colors = ['#3B82F6', '#10B981', '#F59E0B', '#8B5CF6', '#EC4899', '#EF4444', '#6B7280', '#14B8A6', '#F97316', '#84CC16'];
       const task = {
         id: Date.now(),
         name: newTask.name,
         duration: newTask.duration,
         notes: newTask.notes || '',
-        color: '#' + Math.floor(Math.random()*16777215).toString(16)
+        color: colors[Math.floor(Math.random() * colors.length)]
       };
       setTasks(prev => [...prev, task]);
       setNewTask({ name: '', duration: 30, notes: '' });
@@ -553,8 +692,37 @@ const TodoCalendarApp = () => {
     }
   };
 
-  const pixelsPerHour = 60; // Fixed: 60 pixels = 1 hour
+  // Increased pixels per hour for better visibility of short tasks
+  const pixelsPerHour = viewMode === 'day' ? 120 : 80; // Day view: 120px/hour, Week view: 80px/hour
   const currentTimePos = getCurrentTimePosition();
+
+  // Day view navigation
+  const handleDayNavigation = (direction) => {
+    if (direction === 'prev') {
+      if (selectedDay > 0) {
+        setSelectedDay(selectedDay - 1);
+      } else {
+        setWeekOffset(weekOffset - 1);
+        setSelectedDay(4);
+      }
+    } else {
+      if (selectedDay < 4) {
+        setSelectedDay(selectedDay + 1);
+      } else {
+        setWeekOffset(weekOffset + 1);
+        setSelectedDay(0);
+      }
+    }
+  };
+
+  const getCurrentDate = () => {
+    if (viewMode === 'day') {
+      return weekDates[selectedDay];
+    }
+    return null;
+  };
+
+  const currentDate = getCurrentDate();
 
   return (
     <div className="h-screen bg-gray-50 p-4 flex flex-col">
@@ -570,6 +738,11 @@ const TodoCalendarApp = () => {
                  currentTasks.length === 1 ? currentTasks[0].name :
                  `${currentTasks[0].name} + ${currentTasks.length - 1} more`}
               </div>
+              {timeRemaining && (
+                <div className="text-sm text-blue-600 mt-1 font-medium">
+                  {timeRemaining} min remaining
+                </div>
+              )}
             </div>
             <div className="bg-green-50 rounded-lg p-3">
               <div className="text-sm text-green-600 font-semibold mb-1">Next Task</div>
@@ -699,56 +872,121 @@ const TodoCalendarApp = () => {
             <div className="bg-white rounded-lg shadow-md p-4 flex-1 flex flex-col">
               <div className="flex justify-between items-center mb-2">
                 <div className="flex items-center gap-4">
-                  <h2 className="text-xl font-semibold text-gray-700">Week Calendar</h2>
+                  <div className="flex items-center gap-2">
+                    <div className="flex bg-gray-100 rounded-lg p-1">
+                      <button
+                        onClick={() => setViewMode('day')}
+                        className={`px-3 py-1 text-sm rounded ${viewMode === 'day' ? 'bg-white shadow-sm' : 'hover:bg-gray-200'}`}
+                      >
+                        <Eye className="w-4 h-4 inline mr-1" />
+                        Day
+                      </button>
+                      <button
+                        onClick={() => setViewMode('week')}
+                        className={`px-3 py-1 text-sm rounded ${viewMode === 'week' ? 'bg-white shadow-sm' : 'hover:bg-gray-200'}`}
+                      >
+                        <Calendar className="w-4 h-4 inline mr-1" />
+                        Week
+                      </button>
+                    </div>
+                  </div>
                   <div className="flex items-center gap-2">
                     <button
-                      onClick={() => setWeekOffset(prev => prev - 1)}
+                      onClick={() => viewMode === 'day' ? handleDayNavigation('prev') : setWeekOffset(prev => prev - 1)}
                       className="p-1 hover:bg-gray-100 rounded"
                     >
                       <ChevronLeft className="w-5 h-5" />
                     </button>
                     <button
-                      onClick={() => setWeekOffset(0)}
+                      onClick={() => {
+                        setWeekOffset(0);
+                        if (viewMode === 'day') {
+                          const today = new Date();
+                          const currentDay = today.getDay() - 1; // 0 = Monday
+                          setSelectedDay(Math.max(0, Math.min(4, currentDay)));
+                        }
+                      }}
                       className="px-3 py-1 text-sm bg-gray-100 rounded hover:bg-gray-200"
                     >
                       Today
                     </button>
                     <button
-                      onClick={() => setWeekOffset(prev => prev + 1)}
+                      onClick={() => viewMode === 'day' ? handleDayNavigation('next') : setWeekOffset(prev => prev + 1)}
                       className="p-1 hover:bg-gray-100 rounded"
                     >
                       <ChevronRight className="w-5 h-5" />
                     </button>
                   </div>
+                  {viewMode === 'day' && currentDate && (
+                    <div className="text-lg font-medium text-gray-700">
+                      {currentDate.toLocaleDateString('en-US', { 
+                        weekday: 'long', 
+                        month: 'long', 
+                        day: 'numeric' 
+                      })}
+                    </div>
+                  )}
                 </div>
-                <button
-                  onClick={() => setShowMeetingModal(true)}
-                  className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 flex items-center gap-2"
-                >
-                  <Calendar className="w-4 h-4" />
-                  Add Meeting
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setShowShareModal(true)}
+                    className="p-2 bg-white border-2 rounded-lg hover:bg-gray-50 flex items-center"
+                    style={{
+                      borderColor: !isOnline ? '#EF4444' : 
+                                  saveStatus === 'saving' ? '#F59E0B' : 
+                                  saveStatus === 'saved' ? '#10B981' : '#EF4444'
+                    }}
+                    title={!isOnline ? 'Offline' : 
+                           saveStatus === 'saving' ? 'Saving...' : 
+                           saveStatus === 'saved' ? 'Synced' : 'Sync Error'}
+                  >
+                    <Share2 
+                      className="w-4 h-4" 
+                      style={{
+                        color: !isOnline ? '#EF4444' : 
+                               saveStatus === 'saving' ? '#F59E0B' : 
+                               saveStatus === 'saved' ? '#10B981' : '#EF4444'
+                      }}
+                    />
+                  </button>
+                  <button
+                    onClick={() => setShowMeetingModal(true)}
+                    className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 flex items-center gap-2"
+                  >
+                    <Calendar className="w-4 h-4" />
+                    Add Meeting
+                  </button>
+                </div>
               </div>
               <div className="text-xs text-gray-500 mb-2">Double-click to add meeting • Drag to reschedule • Drag bottom edge to resize • Double-click to edit</div>
               
               <div className="flex-1 overflow-auto">
-                <div className="grid grid-cols-6 gap-1 min-w-[800px]">
-                  <div className="text-sm font-semibold text-gray-600 p-2 sticky top-0 bg-white z-20">Time</div>
-                  {dayNames.map((day, index) => (
-                    <div key={day} className="text-sm font-semibold text-gray-700 p-2 text-center sticky top-0 bg-white z-20">
-                      <div>{day}</div>
+                <div className={`grid gap-1 min-w-[800px] ${viewMode === 'day' ? 'grid-cols-[80px_1fr]' : 'grid-cols-[80px_repeat(5,1fr)]'}`}>
+                  <div className="text-sm font-semibold text-gray-600 p-1 text-center sticky top-0 bg-white z-20">Time</div>
+                  {viewMode === 'day' ? (
+                    <div className="text-sm font-semibold text-gray-700 p-2 text-center sticky top-0 bg-white z-20">
+                      <div>{dayNames[selectedDay]}</div>
                       <div className="text-xs text-gray-500">
-                        {weekDates[index].toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                        {weekDates[selectedDay].toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
                       </div>
                     </div>
-                  ))}
+                  ) : (
+                    dayNames.map((day, index) => (
+                      <div key={day} className="text-sm font-semibold text-gray-700 p-2 text-center sticky top-0 bg-white z-20">
+                        <div>{day}</div>
+                        <div className="text-xs text-gray-500">
+                          {weekDates[index].toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                        </div>
+                      </div>
+                    ))
+                  )}
                   
-                  {hours.map(hour => (
+                  {(viewMode === 'day' ? hours : weekHours).map(hour => (
                     <React.Fragment key={hour}>
                       <div className="text-sm text-gray-600 p-2 border-t border-gray-200">
                         {hour === 12 ? '12 PM' : hour > 12 ? `${hour - 12} PM` : `${hour} AM`}
                       </div>
-                      {dayNames.map((_, dayIndex) => {
+                      {(viewMode === 'day' ? [selectedDay] : [0, 1, 2, 3, 4]).map((dayIndex) => {
                         const dayItems = getOverlappingItems(dayIndex);
                         
                         return (
@@ -762,9 +1000,9 @@ const TodoCalendarApp = () => {
                           >
                             {/* 15-minute grid lines */}
                             <div className="absolute inset-0 pointer-events-none">
-                              <div className="border-t border-gray-100 absolute w-full" style={{ top: '15px' }}></div>
-                              <div className="border-t border-gray-100 absolute w-full" style={{ top: '30px' }}></div>
-                              <div className="border-t border-gray-100 absolute w-full" style={{ top: '45px' }}></div>
+                              <div className="border-t border-gray-100 absolute w-full" style={{ top: `${pixelsPerHour / 4}px` }}></div>
+                              <div className="border-t border-gray-100 absolute w-full" style={{ top: `${pixelsPerHour / 2}px` }}></div>
+                              <div className="border-t border-gray-100 absolute w-full" style={{ top: `${3 * pixelsPerHour / 4}px` }}></div>
                             </div>
                             
                             {/* Current time line */}
@@ -790,6 +1028,7 @@ const TodoCalendarApp = () => {
                                 const minuteOffset = (item.startTime - Math.floor(item.startTime)) * pixelsPerHour;
                                 const width = item.totalColumns ? `${100 / item.totalColumns}%` : '100%';
                                 const left = item.column ? `${(100 / item.totalColumns) * item.column}%` : '0';
+                                const minHeight = (item.duration / 60) * pixelsPerHour; // Use actual duration height
                                 
                                 return (
                                   <div
@@ -800,12 +1039,12 @@ const TodoCalendarApp = () => {
                                       e.stopPropagation();
                                       handleEditItem(item);
                                     }}
-                                    className="absolute p-1 cursor-move group overflow-hidden"
+                                    className="absolute p-1 cursor-move group overflow-hidden rounded"
                                     style={{
                                       top: `${minuteOffset}px`,
                                       left,
                                       width,
-                                      height: `${(item.duration / 60) * pixelsPerHour}px`,
+                                      height: `${minHeight}px`,
                                       backgroundColor: item.color + 'DD',
                                       zIndex: 10 + (item.column || 0)
                                     }}
@@ -813,11 +1052,14 @@ const TodoCalendarApp = () => {
                                     <div className="text-white text-xs font-semibold h-full relative flex flex-col">
                                       <div className="flex justify-between items-start flex-1">
                                         <div className="flex-1 mr-1 overflow-hidden">
-                                          <div className="break-words">
+                                          <div className="break-words leading-tight">
                                             {item.name}
                                             {item.recurring && (
                                               <Repeat className="w-3 h-3 inline ml-1" />
                                             )}
+                                          </div>
+                                          <div className="text-xs opacity-75 mt-1">
+                                            {item.duration} min
                                           </div>
                                           {item.notes && (
                                             <FileText className="w-3 h-3 mt-1 opacity-70" />
@@ -871,6 +1113,35 @@ const TodoCalendarApp = () => {
             </div>
           </div>
         </div>
+
+        {/* Share Modal */}
+        {showShareModal && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div className="bg-white rounded-lg p-6 w-96">
+              <h3 className="text-xl font-semibold mb-4">Share Calendar</h3>
+              <p className="mb-4">Share this URL to give others access to your calendar:</p>
+              <div className="bg-gray-100 p-3 rounded mb-4 break-all text-sm">
+                {`${window.location.origin}${window.location.pathname}?id=${calendarId || '001'}`}
+              </div>
+              <div className="flex justify-between">
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(`${window.location.origin}${window.location.pathname}?id=${calendarId || '001'}`);
+                  }}
+                  className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
+                >
+                  Copy URL
+                </button>
+                <button
+                  onClick={() => setShowShareModal(false)}
+                  className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Delete Confirmation Dialog */}
         {deleteConfirm && (
@@ -1073,8 +1344,8 @@ const TodoCalendarApp = () => {
                   </label>
                   <input
                     type="range"
-                    min="8"
-                    max="17.75"
+                    min="6"
+                    max="19.75"
                     step="0.25"
                     value={newMeeting.startTime}
                     onChange={(e) => setNewMeeting({ ...newMeeting, startTime: parseFloat(e.target.value) })}

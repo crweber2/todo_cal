@@ -1,0 +1,29 @@
+{
+  "tasks": [
+    {
+      "id": 1755060929034,
+      "name": "cal2",
+      "duration": 30,
+      "notes": "",
+      "color": "#F97316"
+    }
+  ],
+  "meetings": [],
+  "scheduledTasks": [
+    {
+      "id": 1755060929034,
+      "name": "cal2",
+      "duration": 30,
+      "notes": "",
+      "color": "#F97316",
+      "day": 1,
+      "startTime": 10.25,
+      "weekOffset": 0,
+      "column": 0,
+      "totalColumns": 1
+    }
+  ],
+  "completedTasks": [],
+  "cancelledInstances": [],
+  "lastModified": "2025-08-13T04:57:12.245Z"
+}

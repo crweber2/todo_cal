@@ -1,61 +1,170 @@
 # Todo Calendar App
 
-A React-based weekly calendar and task scheduler. Drag tasks into the calendar, manage meetings (including recurring), and track completed items. Data persists in localStorage.
+A full-stack React calendar and task scheduler with real-time sync capabilities. Features drag-and-drop task scheduling, recurring meetings, calendar sharing, and persistent data storage.
 
-## Tech stack
-- React (Create React App)
-- Tailwind CSS (via PostCSS)
-- lucide-react icons
+## Features
+
+- **Interactive Calendar**: Drag tasks into time slots, resize by duration, switch between day/week views
+- **Task Management**: Create, edit, complete, and organize tasks with color coding
+- **Meeting Scheduler**: Add one-time or recurring meetings with notes
+- **Calendar Sync**: Share calendars across devices with unique URLs
+- **Real-time Status**: Visual sync indicators (green=synced, yellow=saving, red=error)
+- **Data Persistence**: Server-side storage with automatic backups to localStorage
+
+## Tech Stack
+
+**Frontend:**
+- React 18 (Create React App)
+- Tailwind CSS for styling
+- Lucide React icons
+- Drag & drop interactions
+
+**Backend:**
+- Node.js with Express server
+- File-based data storage
+- RESTful API endpoints
+- CORS enabled for development
+
+**Deployment:**
+- Docker containerization
+- Koyeb-ready configuration
 
 ## Prerequisites
-- Node.js 16+ (Node 18 LTS recommended)
+
+- Node.js 18+ (LTS recommended)
 - npm 8+
 
 Check your versions:
-- node -v
-- npm -v
+```bash
+node -v
+npm -v
+```
 
-## Quick start (using setup script)
-1) Clone the repo
-   - git clone <your-repo-url> todo-calendar-app
-   - cd todo-calendar-app
+## Quick Start
 
-2) Run the setup script (installs dependencies; optional flag to start dev server)
-   - macOS/Linux:
-     - ./setup.sh         # install only
-     - ./setup.sh --start # install and then start dev server
-   - Windows (Git Bash):
-     - sh setup.sh
-     - sh setup.sh --start
+### Option 1: Using setup script
+```bash
+git clone https://github.com/crweber2/todo_cal.git
+cd todo_cal
+./setup.sh --start    # Install dependencies and start both server and client
+```
 
-This will run npm ci (or npm install if no lockfile) and optionally start the dev server.
+### Option 2: Manual setup
+```bash
+git clone https://github.com/crweber2/todo_cal.git
+cd todo_cal
+npm install
+npm run dev           # Starts both server (port 3001) and client (port 3000)
+```
 
-## Manual setup (without script)
-- npm ci     # preferred for clean installs
-  - or: npm install
-- npm start  # start development server on http://localhost:3000
+### Option 3: Production mode
+```bash
+npm run build         # Build React app
+npm run server        # Start production server on port 3001
+```
 
-## Common scripts
-- npm start  - start dev server with hot reload
-- npm run build - production build to build/
-- npm test   - run tests (if any)
+## Available Scripts
 
-## Project notes
-- Tailwind CSS is preconfigured with postcss.config.js and tailwind.config.js. No extra steps required.
-- Data is stored in localStorage using keys:
-  - todo-tasks
-  - todo-meetings
-  - todo-scheduledTasks
-  - todo-completedTasks
-  - todo-cancelledInstances
+- `npm start` - Development React server (port 3000)
+- `npm run server` - Production Node.js server (port 3001)
+- `npm run dev` - Both server and client in development mode
+- `npm run build` - Production build
+- `npm test` - Run tests
+
+## API Endpoints
+
+- `GET /api/calendar/:id` - Load calendar data
+- `POST /api/calendar/:id` - Save calendar data
+- `POST /api/calendar/new` - Create new calendar
+- `GET /api/calendars` - List all calendars (admin)
+
+## Data Storage
+
+**Server-side:** JSON files in `/data/` directory
+- `calendar_001.json`, `calendar_002.json`, etc.
+
+**Client-side backup:** localStorage keys
+- `todo-tasks`, `todo-meetings`, `todo-scheduledTasks`, `todo-completedTasks`, `todo-cancelledInstances`
+
+## Calendar Sharing
+
+1. Click the share button (color indicates sync status)
+2. Copy the generated URL (e.g., `http://localhost:3001/?id=001`)
+3. Share with others for collaborative calendar access
+4. Each calendar has a unique ID for data isolation
+
+## Docker Deployment
+
+### Local Docker
+```bash
+docker build -t todo-cal .
+docker run -p 3001:3001 todo-cal
+```
+
+### Koyeb Deployment
+See [DEPLOY_KOYEB.md](DEPLOY_KOYEB.md) for detailed deployment instructions.
+
+## Development
+
+### Project Structure
+```
+src/
+├── App.js          # Main React component
+├── index.js        # React entry point
+└── index.css       # Tailwind CSS imports
+
+server.js           # Express server
+data/               # Calendar data storage (created automatically)
+build/              # Production React build
+```
+
+### Key Features Implementation
+
+**Task Scheduling:**
+- Drag tasks from sidebar to calendar slots
+- 15-minute time increments
+- Visual feedback and collision detection
+
+**Meeting Management:**
+- Double-click calendar to create meetings
+- Recurring meeting support with series management
+- Individual instance cancellation
+
+**Sync Status:**
+- Green: Successfully synced
+- Yellow: Currently saving
+- Red: Offline or sync error
 
 ## Troubleshooting
-- If styles don’t apply, ensure PostCSS and Tailwind dependencies are installed: npm ci
-- If the dev server fails to start, delete node_modules and the lockfile, then reinstall:
-  - rm -rf node_modules package-lock.json
-  - npm install
-- If you’re on an older Node version, upgrade to Node 18 LTS.
 
-## Optional: Push to GitHub
-- git remote add origin <your-repo-url>
-- git push -u origin main
+**Server won't start:**
+- Check if port 3001 is available
+- Ensure all dependencies are installed: `npm install`
+- Check server logs for specific errors
+
+**Styles not loading:**
+- Verify Tailwind CSS is configured: `npm run build`
+- Clear browser cache and restart dev server
+
+**Data not persisting:**
+- Check `/data/` directory permissions
+- Verify server has write access to project directory
+- Check browser console for API errors
+
+**Calendar not syncing:**
+- Check network connectivity
+- Verify server is running on correct port
+- Check browser developer tools for failed requests
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch: `git checkout -b feature-name`
+3. Make changes and test thoroughly
+4. Commit changes: `git commit -m "Add feature"`
+5. Push to branch: `git push origin feature-name`
+6. Create a Pull Request
+
+## License
+
+This project is open source and available under the [MIT License](LICENSE).

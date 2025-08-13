@@ -1,0 +1,52 @@
+{
+  "tasks": [
+    {
+      "id": 1755058755536,
+      "name": "AA",
+      "duration": 30,
+      "notes": "",
+      "color": "#48e0e3"
+    }
+  ],
+  "meetings": [
+    {
+      "id": "m1755059691109",
+      "name": "Meet01",
+      "day": 0,
+      "startTime": 9,
+      "duration": 60,
+      "notes": "",
+      "recurring": false,
+      "weekOffset": 0,
+      "color": "#374151"
+    },
+    {
+      "id": "m1755059717987",
+      "name": "group sync",
+      "day": 1,
+      "startTime": 10.75,
+      "duration": 60,
+      "notes": "",
+      "recurring": false,
+      "weekOffset": 0,
+      "color": "#374151"
+    }
+  ],
+  "scheduledTasks": [
+    {
+      "id": 1755058755536,
+      "name": "AA",
+      "duration": 30,
+      "notes": "",
+      "color": "#48e0e3",
+      "day": 1,
+      "startTime": 10,
+      "weekOffset": 0,
+      "column": 0,
+      "totalColumns": 1
+    }
+  ],
+  "completedTasks": [],
+  "cancelledInstances": [],
+  "lastModified": "2025-08-13T04:57:06.629Z"
+}
