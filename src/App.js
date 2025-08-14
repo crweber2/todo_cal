@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Clock, Plus, X, Check, Edit2, Calendar, ChevronLeft, ChevronRight, GripVertical, Repeat, FileText, ArrowUp, Share2, Eye, Zap } from 'lucide-react';
+import { Clock, Plus, X, Check, Edit2, Calendar, ChevronLeft, ChevronRight, GripVertical, Repeat, FileText, ArrowUp, ArrowDown, Share2, Eye, Zap } from 'lucide-react';
 
 const TodoCalendarApp = () => {
   // Calendar sync state
@@ -42,6 +42,7 @@ const TodoCalendarApp = () => {
 
   const [scheduledTasks, setScheduledTasks] = useState(() => loadFromStorage('todo-scheduledTasks', []));
   const [completedTasks, setCompletedTasks] = useState(() => loadFromStorage('todo-completedTasks', []));
+  const [struckThroughTasks, setStruckThroughTasks] = useState(() => new Set(loadFromStorage('todo-struckThroughTasks', [])));
   const [cancelledInstances, setCancelledInstances] = useState(() => new Set(loadFromStorage('todo-cancelledInstances', [])));
 
   const [draggedItem, setDraggedItem] = useState(null);
@@ -172,6 +173,16 @@ const TodoCalendarApp = () => {
       }
     }
   }, [completedTasks]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        window.localStorage.setItem('todo-struckThroughTasks', JSON.stringify(Array.from(struckThroughTasks)));
+      } catch (error) {
+        console.error('Error saving struckThroughTasks to localStorage:', error);
+      }
+    }
+  }, [struckThroughTasks]);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -314,6 +325,13 @@ const TodoCalendarApp = () => {
       ...currentWeekMeetings.filter(m => m.day === day)
     ].sort((a, b) => a.startTime - b.startTime);
 
+    // Reset all items
+    dayItems.forEach(item => {
+      item.column = 0;
+      item.totalColumns = 1;
+    });
+
+    // Find overlapping groups
     const groups = [];
     let currentGroup = [];
 
@@ -335,67 +353,60 @@ const TodoCalendarApp = () => {
       groups.push(currentGroup);
     }
 
-    // Assign columns to overlapping items
+    // Smart column assignment for each group
     groups.forEach(group => {
-      group.forEach((item, index) => {
-        item.column = index;
-        item.totalColumns = group.length;
+      if (group.length <= 1) {
+        // Single item, no overlap
+        group[0].column = 0;
+        group[0].totalColumns = 1;
+        return;
+      }
+
+      // Check if items can be stacked vertically instead of side-by-side
+      const canStack = (item1, item2) => {
+        const item1End = item1.startTime + item1.duration / 60;
+        const item2End = item2.startTime + item2.duration / 60;
+        return item1End <= item2.startTime || item2End <= item1.startTime;
+      };
+
+      // Try to find items that can share columns
+      const columns = [];
+      
+      group.forEach(item => {
+        let assignedColumn = -1;
+        
+        // Try to find an existing column where this item can fit
+        for (let colIndex = 0; colIndex < columns.length; colIndex++) {
+          const canFitInColumn = columns[colIndex].every(colItem => canStack(item, colItem));
+          if (canFitInColumn) {
+            assignedColumn = colIndex;
+            break;
+          }
+        }
+        
+        // If no existing column works, create a new one
+        if (assignedColumn === -1) {
+          assignedColumn = columns.length;
+          columns.push([]);
+        }
+        
+        columns[assignedColumn].push(item);
+        item.column = assignedColumn;
+      });
+      
+      // Set total columns for all items in this group
+      const totalColumns = columns.length;
+      group.forEach(item => {
+        item.totalColumns = totalColumns;
       });
     });
 
     return dayItems;
   };
 
-  const handleDragStart = (e, item, source) => {
-    setDraggedItem({ ...item, source });
-    e.dataTransfer.effectAllowed = 'move';
-  };
-
   const handleDragOver = (e) => {
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
-  };
-
-  const handleDrop = (e, day, hour) => {
-    e.preventDefault();
-    if (!draggedItem) return;
-
-    const rect = e.currentTarget.getBoundingClientRect();
-    const y = e.clientY - rect.top;
-    const quarterHour = Math.floor(y / (pixelsPerHour / 4)) * 0.25;
-    const startTime = timeToSlot(hour + quarterHour);
-
-    const newScheduledItem = {
-      ...draggedItem,
-      day,
-      startTime,
-      weekOffset,
-      id: draggedItem.id || `scheduled-${Date.now()}`
-    };
-
-    if (draggedItem.source === 'scheduled') {
-      setScheduledTasks(prev => prev.map(t => 
-        t.id === draggedItem.id && t.weekOffset === draggedItem.weekOffset 
-          ? { ...newScheduledItem, weekOffset } 
-          : t
-      ));
-    } else if (draggedItem.source === 'meeting') {
-      setMeetings(prev => prev.map(m => 
-        m.id === draggedItem.id 
-          ? { ...m, day: newScheduledItem.day, startTime: newScheduledItem.startTime, weekOffset }
-          : m
-      ));
-    } else if (draggedItem.source === 'completed') {
-      setCompletedTasks(prev => prev.filter(t => t.id !== draggedItem.id));
-      delete newScheduledItem.source;
-      delete newScheduledItem.completedAt;
-      setScheduledTasks(prev => [...prev, newScheduledItem]);
-    } else {
-      delete newScheduledItem.source;
-      setScheduledTasks(prev => [...prev, newScheduledItem]);
-    }
-
-    setDraggedItem(null);
   };
 
   const handleDropToUnscheduled = (e) => {
@@ -501,9 +512,164 @@ const TodoCalendarApp = () => {
   };
 
   const handleUnscheduleTask = (taskId) => {
-    setScheduledTasks(prev => prev.filter(t => 
-      !(t.id === taskId && t.weekOffset === weekOffset)
-    ));
+    // Find the task in scheduled tasks
+    const task = scheduledTasks.find(t => t.id === taskId && t.weekOffset === weekOffset);
+    if (task) {
+      // Remove from scheduled tasks
+      setScheduledTasks(prev => prev.filter(t => 
+        !(t.id === taskId && t.weekOffset === weekOffset)
+      ));
+      
+      // Check if this task exists in the main tasks array
+      const existsInTasks = tasks.some(t => t.id === taskId);
+      if (!existsInTasks) {
+        // If it doesn't exist in tasks (like right-click created tasks), add it there
+        const { day, startTime, weekOffset: _, ...taskWithoutScheduleInfo } = task;
+        setTasks(prev => [...prev, taskWithoutScheduleInfo]);
+      }
+    }
+  };
+
+  // New handler functions for enhanced task icons
+  const handleStrikeThroughTask = (taskId) => {
+    const task = scheduledTasks.find(t => t.id === taskId && t.weekOffset === weekOffset);
+    if (task) {
+      const isCurrentlyStruckThrough = struckThroughTasks.has(taskId);
+      
+      if (isCurrentlyStruckThrough) {
+        // Un-strike-through: remove from struck through tasks and completed tasks
+        setStruckThroughTasks(prev => {
+          const newSet = new Set(prev);
+          newSet.delete(taskId);
+          return newSet;
+        });
+        setCompletedTasks(prev => prev.filter(t => t.id !== taskId));
+      } else {
+        // Strike through: add to struck through tasks and completed tasks
+        setStruckThroughTasks(prev => new Set([...prev, taskId]));
+        setCompletedTasks(prev => {
+          const exists = prev.some(t => t.id === task.id);
+          return exists ? prev : [...prev, { ...task, completedAt: new Date() }];
+        });
+      }
+    }
+  };
+
+  const handleDeleteTask = (taskId) => {
+    // Permanently remove this task everywhere
+    setTasks(prev => prev.filter(t => t.id !== taskId));
+    setScheduledTasks(prev => prev.filter(t => t.id !== taskId));
+    setCompletedTasks(prev => prev.filter(t => t.id !== taskId));
+    setStruckThroughTasks(prev => {
+      const newSet = new Set(prev);
+      newSet.delete(taskId);
+      return newSet;
+    });
+  };
+
+  // Right-click context menu handler
+  const handleRightClickCalendar = (e, day, hour) => {
+    e.preventDefault();
+    const rect = e.currentTarget.getBoundingClientRect();
+    const y = e.clientY - rect.top;
+    const quarterHour = Math.floor(y / (pixelsPerHour / 4)) * 0.25;
+    const startTime = timeToSlot(hour + quarterHour);
+    
+    // Create a new task template but don't add it to scheduled tasks yet
+    const colors = ['#3B82F6', '#10B981', '#F59E0B', '#8B5CF6', '#EC4899', '#EF4444', '#6B7280', '#14B8A6', '#F97316', '#84CC16'];
+    const newTask = {
+      id: Date.now(),
+      name: 'New Task',
+      duration: 30,
+      notes: '',
+      color: colors[Math.floor(Math.random() * colors.length)],
+      day,
+      startTime,
+      weekOffset,
+      isNewRightClickTask: true // Flag to indicate this is a new right-click task
+    };
+    
+    // Open edit modal for the new task without adding it to scheduled tasks yet
+    setEditingItem(newTask);
+  };
+
+  // Enhanced drag handlers with shift-copy functionality
+  const handleEnhancedDragStart = (e, item, source) => {
+    setDraggedItem({ ...item, source });
+    e.dataTransfer.effectAllowed = 'copyMove';
+  };
+
+  const handleEnhancedDrop = (e, day, hour) => {
+    e.preventDefault();
+    if (!draggedItem) return;
+
+    const rect = e.currentTarget.getBoundingClientRect();
+    const y = e.clientY - rect.top;
+    const quarterHour = Math.floor(y / (pixelsPerHour / 4)) * 0.25;
+    const startTime = timeToSlot(hour + quarterHour);
+
+    // Check if shift key is pressed at drop time
+    const isShiftPressed = e.shiftKey;
+
+    const newScheduledItem = {
+      ...draggedItem,
+      day,
+      startTime,
+      weekOffset,
+      id: isShiftPressed ? Date.now() : (draggedItem.id || `scheduled-${Date.now()}`)
+    };
+
+    if (isShiftPressed) {
+      // Copy mode - create duplicate
+      delete newScheduledItem.source;
+      if (draggedItem.source === 'meeting') {
+        const newMeeting = {
+          ...newScheduledItem,
+          id: `m${Date.now()}`,
+          color: '#374151'
+        };
+        setMeetings(prev => [...prev, newMeeting]);
+      } else {
+        setScheduledTasks(prev => [...prev, newScheduledItem]);
+      }
+    } else {
+      // Move mode - existing logic
+      if (draggedItem.source === 'scheduled') {
+        setScheduledTasks(prev => prev.map(t => 
+          t.id === draggedItem.id && t.weekOffset === draggedItem.weekOffset 
+            ? { ...newScheduledItem, weekOffset } 
+            : t
+        ));
+      } else if (draggedItem.source === 'meeting') {
+        setMeetings(prev => prev.map(m => 
+          m.id === draggedItem.id 
+            ? { ...m, day: newScheduledItem.day, startTime: newScheduledItem.startTime, weekOffset }
+            : m
+        ));
+      } else if (draggedItem.source === 'completed') {
+        setCompletedTasks(prev => prev.filter(t => t.id !== draggedItem.id));
+        delete newScheduledItem.source;
+        delete newScheduledItem.completedAt;
+        setScheduledTasks(prev => [...prev, newScheduledItem]);
+      } else {
+        delete newScheduledItem.source;
+        setScheduledTasks(prev => [...prev, newScheduledItem]);
+      }
+    }
+
+    setDraggedItem(null);
+  };
+
+  // Function to check if time slot is in the past
+  const isTimeSlotPast = (dayIndex, hour) => {
+    if (weekOffset !== 0) return false; // Only grey out current week
+    
+    const now = currentTime;
+    const currentDay = now.getDay() - 1; // 0 = Monday
+    const currentHour = now.getHours() + now.getMinutes() / 60;
+    
+    // Consistently grey out all past time slots
+    return dayIndex < currentDay || (dayIndex === currentDay && hour < currentHour);
   };
 
   const handleUncompleteTask = (taskId) => {
@@ -574,12 +740,19 @@ const TodoCalendarApp = () => {
         ));
       } else {
         // Editing a task
-        setTasks(prev => prev.map(t => 
-          t.id === editingItem.id ? { ...t, ...editingItem } : t
-        ));
-        setScheduledTasks(prev => prev.map(t => 
-          t.id === editingItem.id ? { ...t, ...editingItem } : t
-        ));
+        if (editingItem.isNewRightClickTask) {
+          // This is a new right-click task, add it to scheduled tasks
+          const { isNewRightClickTask, ...taskData } = editingItem;
+          setScheduledTasks(prev => [...prev, taskData]);
+        } else {
+          // This is an existing task, update it
+          setTasks(prev => prev.map(t => 
+            t.id === editingItem.id ? { ...t, ...editingItem } : t
+          ));
+          setScheduledTasks(prev => prev.map(t => 
+            t.id === editingItem.id ? { ...t, ...editingItem } : t
+          ));
+        }
       }
       setEditingItem(null);
     }
@@ -871,7 +1044,7 @@ const TodoCalendarApp = () => {
                     onDragStart={(e) => {
                       // Set both drag types - let drop handlers determine which to use
                       setDraggedTaskIndex(index);
-                      handleDragStart(e, task, 'unscheduled');
+                      handleEnhancedDragStart(e, task, 'unscheduled');
                     }}
                     onDragOver={handleTaskDragOver}
                     onDrop={(e) => handleTaskDrop(e, index)}
@@ -1088,11 +1261,14 @@ const TodoCalendarApp = () => {
                         return (
                           <div
                             key={`${hour}-${dayIndex}`}
-                            className="border-t border-l border-gray-200 relative hover:bg-gray-50"
+                            className={`border-t border-l border-gray-200 relative hover:bg-gray-50 ${
+                              isTimeSlotPast(dayIndex, hour) ? 'bg-gray-100' : ''
+                            }`}
                             style={{ height: `${pixelsPerHour}px` }}
                             onDragOver={handleDragOver}
-                            onDrop={(e) => handleDrop(e, dayIndex, hour)}
+                            onDrop={(e) => handleEnhancedDrop(e, dayIndex, hour)}
                             onDoubleClick={(e) => handleDoubleClickCalendar(e, dayIndex, hour)}
+                            onContextMenu={(e) => handleRightClickCalendar(e, dayIndex, hour)}
                           >
                             {/* 15-minute grid lines */}
                             <div className="absolute inset-0 pointer-events-none">
@@ -1130,7 +1306,7 @@ const TodoCalendarApp = () => {
                                   <div
                                     key={`${item.id}-${item.instanceKey || ''}`}
                                     draggable
-                                    onDragStart={(e) => handleDragStart(e, item, isMeeting ? 'meeting' : 'scheduled')}
+                                    onDragStart={(e) => handleEnhancedDragStart(e, item, isMeeting ? 'meeting' : 'scheduled')}
                                     onDoubleClick={(e) => {
                                       e.stopPropagation();
                                       handleEditItem(item);
@@ -1142,51 +1318,88 @@ const TodoCalendarApp = () => {
                                       width,
                                       height: `${minHeight}px`,
                                       backgroundColor: item.color + 'DD',
-                                      zIndex: 10 + (item.column || 0)
+                                      zIndex: 50 + (item.column || 0)
                                     }}
                                   >
                                     <div className="text-white text-xs font-semibold h-full relative flex flex-col">
-                                      <div className="flex justify-between items-start flex-1">
-                                        <div className="flex-1 mr-1 overflow-hidden">
-                                          <div className="break-words leading-tight">
-                                            {item.name}
-                                            {item.recurring && (
-                                              <Repeat className="w-3 h-3 inline ml-1" />
-                                            )}
-                                          </div>
-                                          <div className="text-xs opacity-75 mt-1">
-                                            {item.duration} min
-                                          </div>
-                                          {item.notes && (
-                                            <FileText className="w-3 h-3 mt-1 opacity-70" />
+                                      {/* Task content - full width */}
+                                      <div className="flex-1 overflow-hidden">
+                                        <div className={`break-words leading-tight ${struckThroughTasks.has(item.id) ? 'line-through' : ''}`}>
+                                          {item.name}
+                                          {item.recurring && (
+                                            <Repeat className="w-3 h-3 inline ml-1" />
                                           )}
                                         </div>
-                                        <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
-                                          {!isMeeting && (
+                                        <div className="text-xs opacity-75 mt-1">
+                                          {item.duration} min
+                                        </div>
+                                        {item.notes && (
+                                          <FileText className="w-3 h-3 mt-1 opacity-70" />
+                                        )}
+                                      </div>
+                                      
+                                      {/* Floating action buttons - overlay on top right */}
+                                      <div className="absolute top-1 right-1 flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity bg-black bg-opacity-50 rounded p-0.5">
+                                        {!isMeeting && (
+                                          <>
                                             <button
                                               onClick={(e) => {
                                                 e.stopPropagation();
                                                 handleCompleteTask(item.id);
                                               }}
                                               className="p-0.5 hover:bg-white hover:bg-opacity-20 rounded"
+                                              title="Move to Completed"
+                                            >
+                                              <ArrowDown className="w-3 h-3" />
+                                            </button>
+                                            <button
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                handleUnscheduleTask(item.id);
+                                              }}
+                                              className="p-0.5 hover:bg-white hover:bg-opacity-20 rounded"
+                                              title="Move back to Tasks"
+                                            >
+                                              <ArrowUp className="w-3 h-3" />
+                                            </button>
+                                            <button
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                handleStrikeThroughTask(item.id);
+                                              }}
+                                              className="p-0.5 hover:bg-white hover:bg-opacity-20 rounded"
+                                              title="Strike through and add to Completed"
                                             >
                                               <Check className="w-3 h-3" />
                                             </button>
-                                          )}
+                                            <button
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                handleDeleteTask(item.id);
+                                              }}
+                                              className="p-0.5 hover:bg-white hover:bg-opacity-20 rounded"
+                                              title="Delete permanently"
+                                            >
+                                              <X className="w-3 h-3" />
+                                            </button>
+                                          </>
+                                        )}
+                                        {isMeeting && (
                                           <button
                                             onClick={(e) => {
                                               e.stopPropagation();
-                                              if (isMeeting && item.recurring) {
+                                              if (item.recurring) {
                                                 setDeleteConfirm(item);
                                               } else {
-                                                isMeeting ? handleDeleteMeeting(item) : handleUnscheduleTask(item.id);
+                                                handleDeleteMeeting(item);
                                               }
                                             }}
                                             className="p-0.5 hover:bg-white hover:bg-opacity-20 rounded"
+                                            title="Delete meeting"
                                           >
                                             <X className="w-3 h-3" />
                                           </button>
-                                        </div>
+                                        )}
                                       </div>
                                       {/* Resize handle */}
                                       <div
@@ -1212,7 +1425,7 @@ const TodoCalendarApp = () => {
 
         {/* Share Modal */}
         {showShareModal && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100]">
             <div className="bg-white rounded-lg p-6 w-96">
               <h3 className="text-xl font-semibold mb-4">Share Calendar</h3>
               <p className="mb-4">Share this URL to give others access to your calendar:</p>
@@ -1241,7 +1454,7 @@ const TodoCalendarApp = () => {
 
         {/* Delete Confirmation Dialog */}
         {deleteConfirm && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100]">
             <div className="bg-white rounded-lg p-6 w-96">
               <h3 className="text-xl font-semibold mb-4">Delete Recurring Meeting</h3>
               <p className="mb-4">This is a recurring meeting. What would you like to delete?</p>
@@ -1271,7 +1484,7 @@ const TodoCalendarApp = () => {
 
         {/* Edit Item Modal */}
         {editingItem && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100]">
             <div className="bg-white rounded-lg p-6 w-96 max-h-[80vh] overflow-y-auto">
               <h3 className="text-xl font-semibold mb-4">
                 Edit {editingItem.id.toString().startsWith('m') ? 'Meeting' : 'Task'}
@@ -1359,7 +1572,7 @@ const TodoCalendarApp = () => {
 
         {/* Add Task Modal */}
         {showTaskModal && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100]">
             <div className="bg-white rounded-lg p-6 w-96">
               <h3 className="text-xl font-semibold mb-4">Add New Task</h3>
               <input
@@ -1410,7 +1623,7 @@ const TodoCalendarApp = () => {
 
         {/* Add Meeting Modal */}
         {showMeetingModal && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100]">
             <div className="bg-white rounded-lg p-6 w-96 max-h-[80vh] overflow-y-auto">
               <h3 className="text-xl font-semibold mb-4">
                 {quickMeetingPos ? `Add Meeting at ${formatTime(quickMeetingPos.startTime)} on ${dayNames[quickMeetingPos.day]}` : 'Add New Meeting'}
