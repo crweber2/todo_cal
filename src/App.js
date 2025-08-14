@@ -113,25 +113,111 @@ const TodoCalendarApp = () => {
         setIsOnline(true);
       } else {
         setSaveStatus('error');
+        // Retry after 5 seconds on error
+        setTimeout(() => {
+          if (calendarId) {
+            saveCalendarToServer();
+          }
+        }, 5000);
       }
     } catch (error) {
       console.error('Failed to save calendar to server:', error);
       setSaveStatus('error');
       setIsOnline(false);
+      // Retry after 5 seconds on error
+      setTimeout(() => {
+        if (calendarId) {
+          saveCalendarToServer();
+        }
+      }, 5000);
     }
   }, [calendarId, tasks, meetings, scheduledTasks, completedTasks, cancelledInstances]);
 
-
-  // Auto-save to server when data changes
+  // Auto-save to server when data changes - fixed circular dependency
   useEffect(() => {
-    if (calendarId) {
-      const timeoutId = setTimeout(() => {
-        saveCalendarToServer();
-      }, 2000); // Save 2 seconds after last change
-      
-      return () => clearTimeout(timeoutId);
-    }
-  }, [tasks, meetings, scheduledTasks, completedTasks, cancelledInstances, calendarId, saveCalendarToServer]);
+    if (!calendarId) return;
+    
+    const timeoutId = setTimeout(async () => {
+      try {
+        setSaveStatus('saving');
+        const data = {
+          tasks,
+          meetings,
+          scheduledTasks,
+          completedTasks,
+          cancelledInstances: Array.from(cancelledInstances)
+        };
+        
+        const response = await fetch(`/api/calendar/${calendarId}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data)
+        });
+        
+        if (response.ok) {
+          const result = await response.json();
+          setLastSaved(result.lastModified);
+          setSaveStatus('saved');
+          setIsOnline(true);
+        } else {
+          setSaveStatus('error');
+          // Retry after 5 seconds on error
+          setTimeout(async () => {
+            if (calendarId) {
+              try {
+                const retryResponse = await fetch(`/api/calendar/${calendarId}`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(data)
+                });
+                if (retryResponse.ok) {
+                  const retryResult = await retryResponse.json();
+                  setLastSaved(retryResult.lastModified);
+                  setSaveStatus('saved');
+                  setIsOnline(true);
+                }
+              } catch (retryError) {
+                console.error('Retry save failed:', retryError);
+              }
+            }
+          }, 5000);
+        }
+      } catch (error) {
+        console.error('Failed to save calendar to server:', error);
+        setSaveStatus('error');
+        setIsOnline(false);
+        // Retry after 5 seconds on error
+        setTimeout(async () => {
+          if (calendarId) {
+            try {
+              const data = {
+                tasks,
+                meetings,
+                scheduledTasks,
+                completedTasks,
+                cancelledInstances: Array.from(cancelledInstances)
+              };
+              const retryResponse = await fetch(`/api/calendar/${calendarId}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+              });
+              if (retryResponse.ok) {
+                const retryResult = await retryResponse.json();
+                setLastSaved(retryResult.lastModified);
+                setSaveStatus('saved');
+                setIsOnline(true);
+              }
+            } catch (retryError) {
+              console.error('Retry save failed:', retryError);
+            }
+          }
+        }, 5000);
+      }
+    }, 2000); // Save 2 seconds after last change
+    
+    return () => clearTimeout(timeoutId);
+  }, [tasks, meetings, scheduledTasks, completedTasks, cancelledInstances, calendarId]);
 
   // Save to localStorage whenever data changes (backup)
   useEffect(() => {
@@ -579,7 +665,7 @@ const TodoCalendarApp = () => {
     const colors = ['#3B82F6', '#10B981', '#F59E0B', '#8B5CF6', '#EC4899', '#EF4444', '#6B7280', '#14B8A6', '#F97316', '#84CC16'];
     const newTask = {
       id: Date.now(),
-      name: 'New Task',
+      name: '',
       duration: 30,
       notes: '',
       color: colors[Math.floor(Math.random() * colors.length)],
@@ -1496,6 +1582,7 @@ const TodoCalendarApp = () => {
                 onKeyPress={(e) => handleKeyPress(e, handleSaveEdit)}
                 className="w-full p-2 border rounded mb-4"
                 placeholder="Name"
+                autoFocus
               />
               <label className="block text-sm font-medium text-gray-700 mb-2">
                 Duration: {editingItem.duration} minutes
