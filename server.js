@@ -34,6 +34,10 @@ function generateCalendarId() {
 app.get('/api/calendar/:id', async (req, res) => {
   try {
     const { id } = req.params;
+    // Ensure we don't create an "undefined" calendar
+    if (id === 'undefined') {
+      return res.status(400).json({ error: 'Invalid calendar ID' });
+    }
     const filePath = path.join(DATA_DIR, `calendar_${id}.json`);
     
     try {
@@ -64,15 +68,73 @@ app.post('/api/calendar/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const filePath = path.join(DATA_DIR, `calendar_${id}.json`);
+    const { clientLastModified, ...newData } = req.body;
     
-    // Add timestamp to the data
-    const dataWithTimestamp = {
-      ...req.body,
-      lastModified: new Date().toISOString()
+    let existingData = null;
+    let existingLastModified = null;
+    
+    // Try to read existing data
+    try {
+      const existingContent = await fs.readFile(filePath, 'utf8');
+      existingData = JSON.parse(existingContent);
+      existingLastModified = existingData.lastModified;
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        throw error;
+      }
+      // File doesn't exist, this is a new calendar
+    }
+    
+    // Check for conflicts if client provided their last known timestamp
+    if (clientLastModified && existingLastModified) {
+      const clientTime = new Date(clientLastModified);
+      const serverTime = new Date(existingLastModified);
+      
+      if (serverTime > clientTime) {
+        // Server has newer data, reject the save
+        return res.status(409).json({ 
+          error: 'Conflict detected', 
+          message: 'Calendar has been modified by another client',
+          serverData: existingData,
+          serverLastModified: existingLastModified
+        });
+      }
+    }
+    
+    // Compare data to see if there are actual changes
+    let hasChanges = false;
+    if (existingData) {
+      // Deep comparison of the data (excluding lastModified)
+      const existingDataForComparison = { ...existingData };
+      delete existingDataForComparison.lastModified;
+      delete existingDataForComparison.created;
+      
+      const newDataForComparison = { ...newData };
+      
+      hasChanges = JSON.stringify(existingDataForComparison) !== JSON.stringify(newDataForComparison);
+    } else {
+      // No existing data, so this is definitely a change
+      hasChanges = true;
+    }
+    
+    // Only update lastModified if there are actual changes
+    const dataToSave = {
+      ...newData,
+      lastModified: hasChanges ? new Date().toISOString() : existingLastModified,
+      created: existingData?.created || new Date().toISOString()
     };
     
-    await fs.writeFile(filePath, JSON.stringify(dataWithTimestamp, null, 2));
-    res.json({ success: true, lastModified: dataWithTimestamp.lastModified });
+    // Only write to file if there are changes
+    if (hasChanges) {
+      await fs.writeFile(filePath, JSON.stringify(dataToSave, null, 2));
+    }
+    
+    res.json({ 
+      success: true, 
+      lastModified: dataToSave.lastModified,
+      hasChanges,
+      message: hasChanges ? 'Calendar updated' : 'No changes detected'
+    });
   } catch (error) {
     console.error('Error saving calendar:', error);
     res.status(500).json({ error: 'Failed to save calendar' });

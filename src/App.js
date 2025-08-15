@@ -5,7 +5,7 @@ const TodoCalendarApp = () => {
   // Calendar sync state
   const [calendarId, setCalendarId] = useState(null);
   const [isOnline, setIsOnline] = useState(true);
-  const [, setLastSaved] = useState(null);
+  const [lastSaved, setLastSaved] = useState(null);
   const [saveStatus, setSaveStatus] = useState('saved'); // 'saving', 'saved', 'error'
 
   // View state
@@ -52,6 +52,7 @@ const TodoCalendarApp = () => {
   const [showTaskModal, setShowTaskModal] = useState(false);
   const [showMeetingModal, setShowMeetingModal] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
+  const [showDebugModal, setShowDebugModal] = useState(false);
   const [newTask, setNewTask] = useState({ name: '', duration: 30, notes: '' });
   const [newMeeting, setNewMeeting] = useState({ name: '', day: 0, startTime: 9, duration: 60, notes: '', recurring: false });
   const [weekOffset, setWeekOffset] = useState(0);
@@ -62,17 +63,29 @@ const TodoCalendarApp = () => {
   // Check for calendar ID in URL on load, default to "001"
   useEffect(() => {
     const urlParams = new URLSearchParams(window.location.search);
+    // Ensure we have a valid calendar ID, default to "001" if none provided or if "undefined"
     const id = urlParams.get('id') || '001';
-    setCalendarId(id);
-    loadCalendarFromServer(id);
+    const validId = id === 'undefined' ? '001' : id;
+    console.log('Calendar ID from URL:', id);
+    console.log('Valid Calendar ID:', validId);
+    setCalendarId(validId);
+    // Update URL to reflect the actual calendar ID being used
+    if (!urlParams.get('id') || id === 'undefined') {
+      urlParams.set('id', validId);
+      window.history.replaceState({}, '', `${window.location.pathname}?${urlParams.toString()}`);
+    }
+    loadCalendarFromServer(validId);
   }, []);
 
   // Server sync functions
   const loadCalendarFromServer = async (id) => {
     try {
+      console.log('Loading calendar from server with ID:', id);
       const response = await fetch(`/api/calendar/${id}`);
+      console.log('Calendar load response:', response.status, response.statusText);
       if (response.ok) {
         const data = await response.json();
+        console.log('Calendar data loaded:', data);
         setTasks(data.tasks || []);
         setMeetings(data.meetings || []);
         setScheduledTasks(data.scheduledTasks || []);
@@ -80,6 +93,9 @@ const TodoCalendarApp = () => {
         setCancelledInstances(new Set(data.cancelledInstances || []));
         setLastSaved(data.lastModified);
         setIsOnline(true);
+      } else {
+        console.error('Failed to load calendar from server:', response.status, response.statusText);
+        setIsOnline(false);
       }
     } catch (error) {
       console.error('Failed to load calendar from server:', error);
@@ -133,7 +149,7 @@ const TodoCalendarApp = () => {
     }
   }, [calendarId, tasks, meetings, scheduledTasks, completedTasks, cancelledInstances]);
 
-  // Auto-save to server when data changes - fixed circular dependency
+  // Auto-save to server when data changes - with conflict detection and change comparison
   useEffect(() => {
     if (!calendarId) return;
     
@@ -145,7 +161,8 @@ const TodoCalendarApp = () => {
           meetings,
           scheduledTasks,
           completedTasks,
-          cancelledInstances: Array.from(cancelledInstances)
+          cancelledInstances: Array.from(cancelledInstances),
+          clientLastModified: lastSaved // Include client's last known timestamp
         };
         
         const response = await fetch(`/api/calendar/${calendarId}`, {
@@ -159,6 +176,32 @@ const TodoCalendarApp = () => {
           setLastSaved(result.lastModified);
           setSaveStatus('saved');
           setIsOnline(true);
+          
+          // Log if no changes were detected
+          if (!result.hasChanges) {
+            console.log('Auto-save skipped: No changes detected');
+          }
+        } else if (response.status === 409) {
+          // Conflict detected
+          const conflictData = await response.json();
+          console.warn('Conflict detected:', conflictData.message);
+          setSaveStatus('error');
+          
+          // Handle conflict - for now, reload the server data
+          // In a more sophisticated implementation, you might show a merge UI
+          if (conflictData.serverData) {
+            console.log('Reloading server data due to conflict...');
+            setTasks(conflictData.serverData.tasks || []);
+            setMeetings(conflictData.serverData.meetings || []);
+            setScheduledTasks(conflictData.serverData.scheduledTasks || []);
+            setCompletedTasks(conflictData.serverData.completedTasks || []);
+            setCancelledInstances(new Set(conflictData.serverData.cancelledInstances || []));
+            setLastSaved(conflictData.serverLastModified);
+            setSaveStatus('saved');
+            
+            // Show user notification about the conflict
+            alert('Your calendar was updated by another browser. Your changes have been overridden with the latest version.');
+          }
         } else {
           setSaveStatus('error');
           // Retry after 5 seconds on error
@@ -195,7 +238,8 @@ const TodoCalendarApp = () => {
                 meetings,
                 scheduledTasks,
                 completedTasks,
-                cancelledInstances: Array.from(cancelledInstances)
+                cancelledInstances: Array.from(cancelledInstances),
+                clientLastModified: lastSaved
               };
               const retryResponse = await fetch(`/api/calendar/${calendarId}`, {
                 method: 'POST',
@@ -217,7 +261,7 @@ const TodoCalendarApp = () => {
     }, 2000); // Save 2 seconds after last change
     
     return () => clearTimeout(timeoutId);
-  }, [tasks, meetings, scheduledTasks, completedTasks, cancelledInstances, calendarId]);
+  }, [tasks, meetings, scheduledTasks, completedTasks, cancelledInstances, calendarId, lastSaved]);
 
   // Save to localStorage whenever data changes (backup)
   useEffect(() => {
@@ -1070,25 +1114,62 @@ const TodoCalendarApp = () => {
         
         {/* Status Bar */}
         <div className="bg-white rounded-lg shadow-md p-4 mb-4">
-          <div className="grid grid-cols-2 gap-4">
-            <div className="bg-blue-50 rounded-lg p-3">
-              <div className="text-sm text-blue-600 font-semibold mb-1">Current Task</div>
-              <div className="text-lg font-bold text-blue-900">
-                {currentTasks.length === 0 ? 'No active task' : 
-                 currentTasks.length === 1 ? currentTasks[0].name :
-                 `${currentTasks[0].name} + ${currentTasks.length - 1} more`}
-              </div>
-              {timeRemaining && (
-                <div className="text-sm text-blue-600 mt-1 font-medium">
-                  {timeRemaining} min remaining
+          <div className="flex justify-between items-start">
+            <div className="flex gap-4 flex-1">
+              <div className="bg-blue-50 rounded-lg p-3 flex-1">
+                <div className="text-sm text-blue-600 font-semibold mb-1">Current Task</div>
+                <div className="text-lg font-bold text-blue-900">
+                  {currentTasks.length === 0 ? 'No active task' : 
+                   currentTasks.length === 1 ? currentTasks[0].name :
+                   `${currentTasks[0].name} + ${currentTasks.length - 1} more`}
                 </div>
-              )}
-            </div>
-            <div className="bg-green-50 rounded-lg p-3">
-              <div className="text-sm text-green-600 font-semibold mb-1">Next Task</div>
-              <div className="text-lg font-bold text-green-900">
-                {nextTask ? `${nextTask.name} at ${formatTime(nextTask.startTime)}` : 'No upcoming task'}
+                {timeRemaining && (
+                  <div className="text-sm text-blue-600 mt-1 font-medium">
+                    {timeRemaining} min remaining
+                  </div>
+                )}
               </div>
+              <div className="bg-green-50 rounded-lg p-3 flex-1">
+                <div className="text-sm text-green-600 font-semibold mb-1">Next Task</div>
+                <div className="text-lg font-bold text-green-900">
+                  {nextTask ? `${nextTask.name} at ${formatTime(nextTask.startTime)}` : 'No upcoming task'}
+                </div>
+              </div>
+            </div>
+            <div className="flex flex-col gap-2 ml-4">
+              <button
+                onClick={() => setShowShareModal(true)}
+                className="p-2 bg-white border-2 rounded-lg hover:bg-gray-50 flex items-center h-8 w-8 justify-center"
+                style={{
+                  borderColor: !isOnline ? '#EF4444' : 
+                              saveStatus === 'saving' ? '#F59E0B' : 
+                              saveStatus === 'saved' ? '#10B981' : '#EF4444'
+                }}
+                title={!isOnline ? 'Offline' : 
+                       saveStatus === 'saving' ? 'Saving...' : 
+                       saveStatus === 'saved' ? 'Synced' : 'Sync Error'}
+              >
+                <Share2 
+                  className="w-3 h-3" 
+                  style={{
+                    color: !isOnline ? '#EF4444' : 
+                           saveStatus === 'saving' ? '#F59E0B' : 
+                           saveStatus === 'saved' ? '#10B981' : '#EF4444'
+                  }}
+                />
+              </button>
+              <button
+                onClick={() => setShowDebugModal(true)}
+                className="p-2 bg-white border-2 rounded-lg hover:bg-gray-50 flex items-center h-8 w-8 justify-center"
+                style={{
+                  borderColor: !isOnline ? '#EF4444' : 
+                              saveStatus === 'saving' ? '#F59E0B' : 
+                              saveStatus === 'saved' ? '#10B981' : '#EF4444'
+                }}
+                title="Debug Information"
+              >
+                <span className="text-xs font-bold">?</span>
+              </button>
             </div>
           </div>
         </div>
@@ -1282,36 +1363,13 @@ const TodoCalendarApp = () => {
                     </div>
                   )}
                 </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => setShowShareModal(true)}
-                    className="p-2 bg-white border-2 rounded-lg hover:bg-gray-50 flex items-center"
-                    style={{
-                      borderColor: !isOnline ? '#EF4444' : 
-                                  saveStatus === 'saving' ? '#F59E0B' : 
-                                  saveStatus === 'saved' ? '#10B981' : '#EF4444'
-                    }}
-                    title={!isOnline ? 'Offline' : 
-                           saveStatus === 'saving' ? 'Saving...' : 
-                           saveStatus === 'saved' ? 'Synced' : 'Sync Error'}
-                  >
-                    <Share2 
-                      className="w-4 h-4" 
-                      style={{
-                        color: !isOnline ? '#EF4444' : 
-                               saveStatus === 'saving' ? '#F59E0B' : 
-                               saveStatus === 'saved' ? '#10B981' : '#EF4444'
-                      }}
-                    />
-                  </button>
-                  <button
-                    onClick={() => setShowMeetingModal(true)}
-                    className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 flex items-center gap-2"
-                  >
-                    <Calendar className="w-4 h-4" />
-                    Add Meeting
-                  </button>
-                </div>
+                <button
+                  onClick={() => setShowMeetingModal(true)}
+                  className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 flex items-center gap-2"
+                >
+                  <Calendar className="w-4 h-4" />
+                  Add Meeting
+                </button>
               </div>
               <div className="text-xs text-gray-500 mb-2">Double-click to add meeting • Drag to reschedule • Drag bottom edge to resize • Double-click to edit</div>
               
@@ -1511,7 +1569,14 @@ const TodoCalendarApp = () => {
 
         {/* Share Modal */}
         {showShareModal && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100]">
+          <div 
+            className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100]"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) {
+                setShowShareModal(false);
+              }
+            }}
+          >
             <div className="bg-white rounded-lg p-6 w-96">
               <h3 className="text-xl font-semibold mb-4">Share Calendar</h3>
               <p className="mb-4">Share this URL to give others access to your calendar:</p>
@@ -1540,7 +1605,14 @@ const TodoCalendarApp = () => {
 
         {/* Delete Confirmation Dialog */}
         {deleteConfirm && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100]">
+          <div 
+            className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100]"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) {
+                setDeleteConfirm(null);
+              }
+            }}
+          >
             <div className="bg-white rounded-lg p-6 w-96">
               <h3 className="text-xl font-semibold mb-4">Delete Recurring Meeting</h3>
               <p className="mb-4">This is a recurring meeting. What would you like to delete?</p>
@@ -1570,7 +1642,14 @@ const TodoCalendarApp = () => {
 
         {/* Edit Item Modal */}
         {editingItem && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100]">
+          <div 
+            className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100]"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) {
+                setEditingItem(null);
+              }
+            }}
+          >
             <div className="bg-white rounded-lg p-6 w-96 max-h-[80vh] overflow-y-auto">
               <h3 className="text-xl font-semibold mb-4">
                 Edit {editingItem.id.toString().startsWith('m') ? 'Meeting' : 'Task'}
@@ -1659,7 +1738,14 @@ const TodoCalendarApp = () => {
 
         {/* Add Task Modal */}
         {showTaskModal && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100]">
+          <div 
+            className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100]"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) {
+                setShowTaskModal(false);
+              }
+            }}
+          >
             <div className="bg-white rounded-lg p-6 w-96">
               <h3 className="text-xl font-semibold mb-4">Add New Task</h3>
               <input
@@ -1710,7 +1796,15 @@ const TodoCalendarApp = () => {
 
         {/* Add Meeting Modal */}
         {showMeetingModal && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100]">
+          <div 
+            className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100]"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) {
+                setShowMeetingModal(false);
+                setQuickMeetingPos(null);
+              }
+            }}
+          >
             <div className="bg-white rounded-lg p-6 w-96 max-h-[80vh] overflow-y-auto">
               <h3 className="text-xl font-semibold mb-4">
                 {quickMeetingPos ? `Add Meeting at ${formatTime(quickMeetingPos.startTime)} on ${dayNames[quickMeetingPos.day]}` : 'Add New Meeting'}
@@ -1795,6 +1889,78 @@ const TodoCalendarApp = () => {
                   className="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600"
                 >
                   Add Meeting
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Debug Modal */}
+        {showDebugModal && (
+          <div 
+            className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100]"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) {
+                setShowDebugModal(false);
+              }
+            }}
+          >
+            <div className="bg-white rounded-lg p-6 w-96 max-h-[80vh] overflow-y-auto">
+              <h3 className="text-xl font-semibold mb-4">Debug Information</h3>
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700">Calendar ID:</label>
+                  <div className="mt-1 p-2 bg-gray-100 rounded break-all text-sm">{calendarId || 'Not set'}</div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700">Last Modified:</label>
+                  <div className="mt-1 p-2 bg-gray-100 rounded break-all text-sm">
+                    {lastSaved ? new Date(lastSaved).toLocaleString() : 'Not available'}
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700">Connection Status:</label>
+                  <div className="mt-1 p-2 bg-gray-100 rounded text-sm">
+                    <span className={`inline-block w-3 h-3 rounded-full mr-2 ${isOnline ? 'bg-green-500' : 'bg-red-500'}`}></span>
+                    {isOnline ? 'Online' : 'Offline'}
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700">Save Status:</label>
+                  <div className="mt-1 p-2 bg-gray-100 rounded text-sm">
+                    {saveStatus === 'saving' && (
+                      <span className="text-yellow-600">Saving...</span>
+                    )}
+                    {saveStatus === 'saved' && (
+                      <span className="text-green-600">Saved</span>
+                    )}
+                    {saveStatus === 'error' && (
+                      <span className="text-red-600">Error</span>
+                    )}
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700">Task Counts:</label>
+                  <div className="mt-1 p-2 bg-gray-100 rounded text-sm">
+                    <div>Tasks: {tasks.length}</div>
+                    <div>Meetings: {meetings.length}</div>
+                    <div>Scheduled: {scheduledTasks.length}</div>
+                    <div>Completed: {completedTasks.length}</div>
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700">URL:</label>
+                  <div className="mt-1 p-2 bg-gray-100 rounded break-all text-sm">
+                    {window.location.href}
+                  </div>
+                </div>
+              </div>
+              <div className="mt-6 flex justify-end">
+                <button
+                  onClick={() => setShowDebugModal(false)}
+                  className="px-4 py-2 bg-gray-200 text-gray-800 rounded hover:bg-gray-300"
+                >
+                  Close
                 </button>
               </div>
             </div>

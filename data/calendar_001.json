@@ -1,13 +1,6 @@
 {
   "tasks": [
     {
-      "id": 1755058755536,
-      "name": "AA",
-      "duration": 30,
-      "notes": "",
-      "color": "#48e0e3"
-    },
-    {
       "id": 1755062485377,
       "name": "Task1",
       "duration": 30,
@@ -34,6 +27,13 @@
       "duration": 60,
       "notes": "",
       "color": "#8B5CF6"
+    },
+    {
+      "id": 1755231571708,
+      "name": "Test Conflict Detection",
+      "duration": 30,
+      "notes": "",
+      "color": "#10B981"
     }
   ],
   "meetings": [
@@ -62,25 +62,26 @@
   ],
   "scheduledTasks": [
     {
-      "id": 1755058755536,
-      "name": "AA",
-      "duration": 30,
-      "notes": "",
-      "color": "#48e0e3",
-      "day": 1,
-      "startTime": 10,
-      "weekOffset": 0,
-      "column": 0,
-      "totalColumns": 1
-    },
-    {
       "id": 1755062485377,
       "name": "Task1",
       "duration": 30,
       "notes": "",
       "color": "#F97316",
       "day": 0,
-      "startTime": 8.25,
+      "startTime": 10.5,
+      "weekOffset": 0,
+      "column": 0,
+      "totalColumns": 1,
+      "source": "scheduled"
+    },
+    {
+      "id": 1755229642732,
+      "name": "Schedule appt",
+      "duration": 30,
+      "notes": "",
+      "color": "#10B981",
+      "day": 2,
+      "startTime": 9.25,
       "weekOffset": 0,
       "column": 0,
       "totalColumns": 1
@@ -103,5 +104,6 @@
     }
   ],
   "cancelledInstances": [],
-  "lastModified": "2025-08-13T05:32:34.087Z"
+  "lastModified": "2025-08-15T04:19:33.723Z",
+  "created": "2025-08-15T04:18:56.299Z"
 }
