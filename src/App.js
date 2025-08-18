@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Clock, Plus, X, Check, Edit2, Calendar, ChevronLeft, ChevronRight, GripVertical, Repeat, FileText, ArrowUp, ArrowDown, Share2, Eye, Zap } from 'lucide-react';
+import { Clock, Plus, X, Check, Edit2, Calendar, ChevronLeft, ChevronRight, GripVertical, Repeat, FileText, ArrowUp, ArrowDown, Eye, Zap, Bell, BellOff } from 'lucide-react';
 
 const TodoCalendarApp = () => {
   // Calendar sync state
@@ -51,7 +51,6 @@ const TodoCalendarApp = () => {
   const [editingItem, setEditingItem] = useState(null);
   const [showTaskModal, setShowTaskModal] = useState(false);
   const [showMeetingModal, setShowMeetingModal] = useState(false);
-  const [showShareModal, setShowShareModal] = useState(false);
   const [showDebugModal, setShowDebugModal] = useState(false);
   const [newTask, setNewTask] = useState({ name: '', duration: 30, notes: '' });
   const [newMeeting, setNewMeeting] = useState({ name: '', day: 0, startTime: 9, duration: 60, notes: '', recurring: false });
@@ -59,6 +58,13 @@ const TodoCalendarApp = () => {
   const [resizingItem, setResizingItem] = useState(null);
   const [quickMeetingPos, setQuickMeetingPos] = useState(null);
   const [deleteConfirm, setDeleteConfirm] = useState(null);
+  
+  // Chime functionality
+  const [chimeEnabled, setChimeEnabled] = useState(() => loadFromStorage('todo-chimeEnabled', true));
+  const [lastChimeTime, setLastChimeTime] = useState(null);
+  
+  // Color mapping for consistent task colors based on first word
+  const [colorMap, setColorMap] = useState(() => loadFromStorage('todo-colorMap', {}));
 
   // Check for calendar ID in URL on load, default to "001"
   useEffect(() => {
@@ -324,11 +330,129 @@ const TodoCalendarApp = () => {
     }
   }, [cancelledInstances]);
 
-  // Update current time every minute
+  // Save chime preference to localStorage
   useEffect(() => {
-    const timer = setInterval(() => setCurrentTime(new Date()), 60000);
+    if (typeof window !== 'undefined') {
+      try {
+        window.localStorage.setItem('todo-chimeEnabled', JSON.stringify(chimeEnabled));
+      } catch (error) {
+        console.error('Error saving chimeEnabled to localStorage:', error);
+      }
+    }
+  }, [chimeEnabled]);
+
+  // Save color map to localStorage
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        window.localStorage.setItem('todo-colorMap', JSON.stringify(colorMap));
+      } catch (error) {
+        console.error('Error saving colorMap to localStorage:', error);
+      }
+    }
+  }, [colorMap]);
+
+  // Get meetings for current week (including recurring)
+  const getVisibleMeetings = useCallback(() => {
+    const visible = [];
+    
+    meetings.forEach(meeting => {
+      const instanceKey = `${meeting.id || meeting.seriesId}-week${weekOffset}`;
+      
+      if (!cancelledInstances.has(instanceKey)) {
+        if (meeting.recurring) {
+          // Show recurring meetings in every week
+          visible.push({ ...meeting, weekOffset, instanceKey });
+        } else if (meeting.weekOffset === weekOffset) {
+          // Show non-recurring meetings only in their specific week
+          visible.push({ ...meeting, instanceKey });
+        }
+      }
+    });
+    
+    return visible;
+  }, [meetings, weekOffset, cancelledInstances]);
+
+  // Create audio context for chime
+  const playChime = useCallback(() => {
+    if (!chimeEnabled) return;
+    
+    try {
+      // Create a simple chime sound using Web Audio API
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const oscillator = audioContext.createOscillator();
+      const gainNode = audioContext.createGain();
+      
+      oscillator.connect(gainNode);
+      gainNode.connect(audioContext.destination);
+      
+      // Create a pleasant chime sound (C major chord)
+      oscillator.frequency.setValueAtTime(523.25, audioContext.currentTime); // C5
+      oscillator.frequency.setValueAtTime(659.25, audioContext.currentTime + 0.1); // E5
+      oscillator.frequency.setValueAtTime(783.99, audioContext.currentTime + 0.2); // G5
+      
+      gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 1);
+      
+      oscillator.start(audioContext.currentTime);
+      oscillator.stop(audioContext.currentTime + 1);
+    } catch (error) {
+      console.error('Error playing chime:', error);
+    }
+  }, [chimeEnabled]);
+
+  // Update current time every minute and check for chime notifications
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const newTime = new Date();
+      setCurrentTime(newTime);
+      
+      if (!chimeEnabled || weekOffset !== 0) return;
+      
+      const currentDay = newTime.getDay() - 1; // 0 = Monday
+      const currentHour = newTime.getHours() + newTime.getMinutes() / 60;
+      const currentMinute = newTime.getMinutes();
+      
+      // Only check on the minute mark to avoid duplicate chimes
+      if (currentMinute === 0 || currentMinute === 5 || currentMinute === 10 || 
+          currentMinute === 15 || currentMinute === 20 || currentMinute === 25 || 
+          currentMinute === 30 || currentMinute === 35 || currentMinute === 40 || 
+          currentMinute === 45 || currentMinute === 50 || currentMinute === 55) {
+        
+        const currentWeekTasks = scheduledTasks.filter(t => t.weekOffset === weekOffset);
+        const currentWeekMeetings = getVisibleMeetings();
+        const allScheduled = [...currentWeekTasks, ...currentWeekMeetings];
+        
+        for (const task of allScheduled) {
+          if (task.day !== currentDay) continue;
+          
+          const taskEndTime = task.startTime + task.duration / 60;
+          const fiveMinutesBeforeEnd = taskEndTime - (5 / 60);
+          
+          // Chime 5 minutes before task completion
+          if (Math.abs(currentHour - fiveMinutesBeforeEnd) < 0.02) { // Within ~1 minute tolerance
+            const chimeKey = `${task.id}-${task.weekOffset || 0}-5min-${Math.floor(fiveMinutesBeforeEnd * 60)}`;
+            if (lastChimeTime !== chimeKey) {
+              playChime();
+              setLastChimeTime(chimeKey);
+              console.log(`Chime: 5 minutes until ${task.name} ends`);
+            }
+          }
+          
+          // Chime at task start
+          if (Math.abs(currentHour - task.startTime) < 0.02) { // Within ~1 minute tolerance
+            const chimeKey = `${task.id}-${task.weekOffset || 0}-start-${Math.floor(task.startTime * 60)}`;
+            if (lastChimeTime !== chimeKey) {
+              playChime();
+              setLastChimeTime(chimeKey);
+              console.log(`Chime: ${task.name} is starting`);
+            }
+          }
+        }
+      }
+    }, 60000);
     return () => clearInterval(timer);
-  }, []);
+  }, [chimeEnabled, weekOffset, scheduledTasks, getVisibleMeetings, lastChimeTime, playChime]);
 
   // Get week dates
   const getWeekDates = () => {
@@ -419,26 +543,6 @@ const TodoCalendarApp = () => {
     return { currentTasks, nextTask, timeRemaining };
   };
 
-  // Get meetings for current week (including recurring)
-  const getVisibleMeetings = () => {
-    const visible = [];
-    
-    meetings.forEach(meeting => {
-      const instanceKey = `${meeting.id || meeting.seriesId}-week${weekOffset}`;
-      
-      if (!cancelledInstances.has(instanceKey)) {
-        if (meeting.recurring) {
-          // Show recurring meetings in every week
-          visible.push({ ...meeting, weekOffset, instanceKey });
-        } else if (meeting.weekOffset === weekOffset) {
-          // Show non-recurring meetings only in their specific week
-          visible.push({ ...meeting, instanceKey });
-        }
-      }
-    });
-    
-    return visible;
-  };
 
   // Increased pixels per hour for better visibility of short tasks
   const pixelsPerHour = viewMode === 'day' ? 120 : 80; // Day view: 120px/hour, Week view: 80px/hour
@@ -706,13 +810,12 @@ const TodoCalendarApp = () => {
     const startTime = timeToSlot(hour + quarterHour);
     
     // Create a new task template but don't add it to scheduled tasks yet
-    const colors = ['#3B82F6', '#10B981', '#F59E0B', '#8B5CF6', '#EC4899', '#EF4444', '#6B7280', '#14B8A6', '#F97316', '#84CC16'];
     const newTask = {
       id: Date.now(),
       name: '',
       duration: 30,
       notes: '',
-      color: colors[Math.floor(Math.random() * colors.length)],
+      color: '#3B82F6', // Default color, will be updated when name is set
       day,
       startTime,
       weekOffset,
@@ -871,9 +974,13 @@ const TodoCalendarApp = () => {
       } else {
         // Editing a task
         if (editingItem.isNewRightClickTask) {
-          // This is a new right-click task, add it to scheduled tasks
+          // This is a new right-click task, add it to scheduled tasks with proper color mapping
           const { isNewRightClickTask, ...taskData } = editingItem;
-          setScheduledTasks(prev => [...prev, taskData]);
+          const taskWithColor = {
+            ...taskData,
+            color: getColorForTask(taskData.name)
+          };
+          setScheduledTasks(prev => [...prev, taskWithColor]);
         } else {
           // This is an existing task, update it
           setTasks(prev => prev.map(t => 
@@ -890,14 +997,12 @@ const TodoCalendarApp = () => {
 
   const handleAddTask = () => {
     if (newTask.name && newTask.duration > 0) {
-      // Predefined colors to avoid white/light colors
-      const colors = ['#3B82F6', '#10B981', '#F59E0B', '#8B5CF6', '#EC4899', '#EF4444', '#6B7280', '#14B8A6', '#F97316', '#84CC16'];
       const task = {
         id: Date.now(),
         name: newTask.name,
         duration: newTask.duration,
         notes: newTask.notes || '',
-        color: colors[Math.floor(Math.random() * colors.length)]
+        color: getColorForTask(newTask.name)
       };
       setTasks(prev => [...prev, task]);
       setNewTask({ name: '', duration: 30, notes: '' });
@@ -1108,6 +1213,27 @@ const TodoCalendarApp = () => {
 
   const currentDate = getCurrentDate();
 
+  // Utility function to get first word from task name for color mapping
+  const getFirstWord = (taskName) => {
+    return taskName.trim().toLowerCase().split(' ')[0] || 'default';
+  };
+
+  // Function to get color for task based on first word
+  const getColorForTask = (taskName) => {
+    const firstWord = getFirstWord(taskName);
+    const colors = ['#3B82F6', '#10B981', '#F59E0B', '#8B5CF6', '#EC4899', '#EF4444', '#6B7280', '#14B8A6', '#F97316', '#84CC16'];
+    
+    // Check if we already have a color for this first word
+    if (colorMap[firstWord]) {
+      return colorMap[firstWord];
+    }
+    
+    // Assign a new color and update the color map
+    const newColor = colors[Object.keys(colorMap).length % colors.length];
+    setColorMap(prev => ({ ...prev, [firstWord]: newColor }));
+    return newColor;
+  };
+
   return (
     <div className="h-screen bg-gray-50 p-4 flex flex-col">
       <div className="w-full mx-auto flex-1 flex flex-col min-h-0">
@@ -1116,47 +1242,72 @@ const TodoCalendarApp = () => {
         <div className="bg-white rounded-lg shadow-md p-4 mb-4">
           <div className="flex justify-between items-start">
             <div className="flex gap-4 flex-1">
-              <div className="bg-blue-50 rounded-lg p-3 flex-1">
-                <div className="text-sm text-blue-600 font-semibold mb-1">Current Task</div>
-                <div className="text-lg font-bold text-blue-900">
-                  {currentTasks.length === 0 ? 'No active task' : 
-                   currentTasks.length === 1 ? currentTasks[0].name :
-                   `${currentTasks[0].name} + ${currentTasks.length - 1} more`}
-                </div>
-                {timeRemaining && (
-                  <div className="text-sm text-blue-600 mt-1 font-medium">
-                    {timeRemaining} min remaining
+              <div 
+                className="bg-blue-50 rounded-lg p-3 flex-1 cursor-pointer hover:bg-blue-100 transition-colors"
+                onDoubleClick={() => {
+                  if (currentTasks.length > 0) {
+                    handleEditItem(currentTasks[0]);
+                  }
+                }}
+              >
+                <div className="flex justify-between items-start">
+                  <div className="flex-1">
+                    <div className="text-sm text-blue-600 font-semibold mb-1">Current Task</div>
+                    <div className="text-lg font-bold text-blue-900">
+                      {currentTasks.length === 0 ? 'No active task' : 
+                       currentTasks.length === 1 ? currentTasks[0].name :
+                       `${currentTasks[0].name} + ${currentTasks.length - 1} more`}
+                    </div>
+                    {timeRemaining && (
+                      <div className="text-sm text-blue-600 mt-1 font-medium">
+                        {timeRemaining} min remaining
+                      </div>
+                    )}
                   </div>
-                )}
+                  {currentTasks.length > 0 && currentTasks[0].notes && (
+                    <div className="ml-3 text-xs text-blue-700 max-w-xs h-full flex items-start">
+                      <div className="break-words whitespace-pre-wrap">{currentTasks[0].notes}</div>
+                    </div>
+                  )}
+                </div>
               </div>
-              <div className="bg-green-50 rounded-lg p-3 flex-1">
-                <div className="text-sm text-green-600 font-semibold mb-1">Next Task</div>
-                <div className="text-lg font-bold text-green-900">
-                  {nextTask ? `${nextTask.name} at ${formatTime(nextTask.startTime)}` : 'No upcoming task'}
+              <div 
+                className="bg-green-50 rounded-lg p-3 flex-1 cursor-pointer hover:bg-green-100 transition-colors"
+                onDoubleClick={() => {
+                  if (nextTask) {
+                    handleEditItem(nextTask);
+                  }
+                }}
+              >
+                <div className="flex justify-between items-start">
+                  <div className="flex-1">
+                    <div className="text-sm text-green-600 font-semibold mb-1">Next Task</div>
+                    <div className="text-lg font-bold text-green-900">
+                      {nextTask ? `${nextTask.name} at ${formatTime(nextTask.startTime)}` : 'No upcoming task'}
+                    </div>
+                  </div>
+                  {nextTask && nextTask.notes && (
+                    <div className="ml-3 text-xs text-green-700 max-w-xs h-full flex items-start">
+                      <div className="break-words whitespace-pre-wrap">{nextTask.notes}</div>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
             <div className="flex flex-col gap-2 ml-4">
               <button
-                onClick={() => setShowShareModal(true)}
+                onClick={() => setChimeEnabled(!chimeEnabled)}
                 className="p-2 bg-white border-2 rounded-lg hover:bg-gray-50 flex items-center h-8 w-8 justify-center"
                 style={{
-                  borderColor: !isOnline ? '#EF4444' : 
-                              saveStatus === 'saving' ? '#F59E0B' : 
-                              saveStatus === 'saved' ? '#10B981' : '#EF4444'
+                  borderColor: chimeEnabled ? '#10B981' : '#6B7280'
                 }}
-                title={!isOnline ? 'Offline' : 
-                       saveStatus === 'saving' ? 'Saving...' : 
-                       saveStatus === 'saved' ? 'Synced' : 'Sync Error'}
+                title={chimeEnabled ? 'Chime notifications enabled - click to disable' : 'Chime notifications disabled - click to enable'}
               >
-                <Share2 
-                  className="w-3 h-3" 
-                  style={{
-                    color: !isOnline ? '#EF4444' : 
-                           saveStatus === 'saving' ? '#F59E0B' : 
-                           saveStatus === 'saved' ? '#10B981' : '#EF4444'
-                  }}
-                />
+                {chimeEnabled ? (
+                  <Bell className="w-3 h-3 text-green-600" />
+                ) : (
+                  <BellOff className="w-3 h-3 text-gray-500" />
+                )}
               </button>
               <button
                 onClick={() => setShowDebugModal(true)}
@@ -1567,41 +1718,6 @@ const TodoCalendarApp = () => {
           </div>
         </div>
 
-        {/* Share Modal */}
-        {showShareModal && (
-          <div 
-            className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100]"
-            onClick={(e) => {
-              if (e.target === e.currentTarget) {
-                setShowShareModal(false);
-              }
-            }}
-          >
-            <div className="bg-white rounded-lg p-6 w-96">
-              <h3 className="text-xl font-semibold mb-4">Share Calendar</h3>
-              <p className="mb-4">Share this URL to give others access to your calendar:</p>
-              <div className="bg-gray-100 p-3 rounded mb-4 break-all text-sm">
-                {`${window.location.origin}${window.location.pathname}?id=${calendarId || '001'}`}
-              </div>
-              <div className="flex justify-between">
-                <button
-                  onClick={() => {
-                    navigator.clipboard.writeText(`${window.location.origin}${window.location.pathname}?id=${calendarId || '001'}`);
-                  }}
-                  className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
-                >
-                  Copy URL
-                </button>
-                <button
-                  onClick={() => setShowShareModal(false)}
-                  className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded"
-                >
-                  Close
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
 
         {/* Delete Confirmation Dialog */}
         {deleteConfirm && (
@@ -1949,7 +2065,21 @@ const TodoCalendarApp = () => {
                   </div>
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700">URL:</label>
+                  <label className="block text-sm font-medium text-gray-700">Calendar Share URL:</label>
+                  <div className="mt-1 p-2 bg-gray-100 rounded break-all text-sm">
+                    {`${window.location.origin}${window.location.pathname}?id=${calendarId || '001'}`}
+                  </div>
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(`${window.location.origin}${window.location.pathname}?id=${calendarId || '001'}`);
+                    }}
+                    className="mt-2 px-3 py-1 bg-blue-500 text-white text-xs rounded hover:bg-blue-600"
+                  >
+                    Copy Share URL
+                  </button>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700">Current URL:</label>
                   <div className="mt-1 p-2 bg-gray-100 rounded break-all text-sm">
                     {window.location.href}
                   </div>
