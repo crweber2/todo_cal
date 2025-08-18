@@ -2,18 +2,51 @@ const express = require('express');
 const fs = require('fs').promises;
 const path = require('path');
 const cors = require('cors');
+const {
+  S3Client,
+  GetObjectCommand,
+  PutObjectCommand,
+  HeadObjectCommand,
+  ListObjectsV2Command,
+} = require('@aws-sdk/client-s3');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 const DATA_DIR = path.join(__dirname, 'data');
+
+// Storage config: Cloudflare R2 (S3-compatible)
+const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID;
+const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID;
+const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY;
+const R2_BUCKET = process.env.R2_BUCKET;
+// You can override endpoint via R2_S3_ENDPOINT (e.g., R2-compatible gateway or custom domain)
+// Otherwise we derive the default API endpoint from the account ID.
+const R2_S3_ENDPOINT =
+  process.env.R2_S3_ENDPOINT || (R2_ACCOUNT_ID ? `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com` : undefined);
+
+const USE_R2 = Boolean(R2_BUCKET && R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY && R2_S3_ENDPOINT);
+
+let s3Client = null;
+if (USE_R2) {
+  s3Client = new S3Client({
+    region: 'auto',
+    endpoint: R2_S3_ENDPOINT,
+    forcePathStyle: true, // Required for Cloudflare R2 path-style addressing
+    credentials: {
+      accessKeyId: R2_ACCESS_KEY_ID,
+      secretAccessKey: R2_SECRET_ACCESS_KEY,
+    },
+  });
+}
 
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.static(path.join(__dirname, 'build')));
 
-// Ensure data directory exists
+// Ensure data directory exists (for filesystem mode)
 async function ensureDataDir() {
+  if (USE_R2) return;
   try {
     await fs.access(DATA_DIR);
   } catch {
@@ -28,6 +61,177 @@ function generateCalendarId() {
   return id;
 }
 
+// Default calendar structure
+function emptyCalendar(initialData = {}) {
+  return {
+    tasks: initialData.tasks || [],
+    meetings: initialData.meetings || [],
+    scheduledTasks: initialData.scheduledTasks || [],
+    completedTasks: initialData.completedTasks || [],
+    cancelledInstances: initialData.cancelledInstances || [],
+  };
+}
+
+// Filesystem helpers
+async function readCalendarFS(id) {
+  const filePath = path.join(DATA_DIR, `calendar_${id}.json`);
+  const content = await fs.readFile(filePath, 'utf8');
+  return JSON.parse(content);
+}
+
+async function writeCalendarFS(id, data) {
+  const filePath = path.join(DATA_DIR, `calendar_${id}.json`);
+  await fs.writeFile(filePath, JSON.stringify(data, null, 2));
+}
+
+async function existsCalendarFS(id) {
+  const filePath = path.join(DATA_DIR, `calendar_${id}.json`);
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// R2 helpers
+const r2KeyForId = (id) => `calendar_${id}.json`;
+
+async function readCalendarR2(id) {
+  const Key = r2KeyForId(id);
+  const res = await s3Client.send(new GetObjectCommand({ Bucket: R2_BUCKET, Key }));
+  // SDK v3 provides transformToString in Node
+  const body = await res.Body.transformToString('utf-8');
+  return JSON.parse(body);
+}
+
+async function writeCalendarR2(id, data) {
+  const Key = r2KeyForId(id);
+  await s3Client.send(
+    new PutObjectCommand({
+      Bucket: R2_BUCKET,
+      Key,
+      Body: JSON.stringify(data, null, 2),
+      ContentType: 'application/json',
+    })
+  );
+}
+
+async function existsCalendarR2(id) {
+  const Key = r2KeyForId(id);
+  try {
+    await s3Client.send(new HeadObjectCommand({ Bucket: R2_BUCKET, Key }));
+    return true;
+  } catch (err) {
+    if (err?.$metadata?.httpStatusCode === 404 || err?.Name === 'NotFound') {
+      return false;
+    }
+    // For R2, missing keys usually return 404 NoSuchKey
+    if (err?.Code === 'NotFound' || err?.name === 'NotFound' || err?.name === 'NoSuchKey') {
+      return false;
+    }
+    throw err;
+  }
+}
+
+async function listCalendarsR2() {
+  const calendars = [];
+  let ContinuationToken = undefined;
+
+  do {
+    const res = await s3Client.send(
+      new ListObjectsV2Command({
+        Bucket: R2_BUCKET,
+        Prefix: 'calendar_',
+        ContinuationToken,
+      })
+    );
+    if (res.Contents) {
+      for (const obj of res.Contents) {
+        const key = obj.Key || '';
+        if (key.startsWith('calendar_') && key.endsWith('.json')) {
+          const id = key.replace('calendar_', '').replace('.json', '');
+          calendars.push(id);
+        }
+      }
+    }
+    ContinuationToken = res.IsTruncated ? res.NextContinuationToken : undefined;
+  } while (ContinuationToken);
+
+  return calendars;
+}
+
+// Unified storage functions
+async function readExistingCalendar(id) {
+  // Returns { existingData, existingLastModified } or nulls if not exists
+  try {
+    if (USE_R2) {
+      const data = await readCalendarR2(id);
+      return { existingData: data, existingLastModified: data.lastModified || null };
+    } else {
+      const data = await readCalendarFS(id);
+      return { existingData: data, existingLastModified: data.lastModified || null };
+    }
+  } catch (err) {
+    // Not found -> treat as new
+    if (USE_R2) {
+      if (
+        err?.$metadata?.httpStatusCode === 404 ||
+        err?.Code === 'NotFound' ||
+        err?.name === 'NotFound' ||
+        err?.name === 'NoSuchKey'
+      ) {
+        return { existingData: null, existingLastModified: null };
+      }
+    } else {
+      if (err?.code === 'ENOENT') {
+        return { existingData: null, existingLastModified: null };
+      }
+    }
+    // Unexpected error
+    throw err;
+  }
+}
+
+async function loadCalendar(id) {
+  try {
+    if (USE_R2) {
+      return await readCalendarR2(id);
+    } else {
+      return await readCalendarFS(id);
+    }
+  } catch (error) {
+    // If not found, return an empty calendar
+    if (USE_R2) {
+      if (
+        error?.$metadata?.httpStatusCode === 404 ||
+        error?.Code === 'NotFound' ||
+        error?.name === 'NotFound' ||
+        error?.name === 'NoSuchKey'
+      ) {
+        return emptyCalendar();
+      }
+    } else {
+      if (error?.code === 'ENOENT') {
+        return emptyCalendar();
+      }
+    }
+    throw error;
+  }
+}
+
+async function persistCalendar(id, data) {
+  if (USE_R2) {
+    await writeCalendarR2(id, data);
+  } else {
+    await writeCalendarFS(id, data);
+  }
+}
+
+async function calendarExists(id) {
+  return USE_R2 ? existsCalendarR2(id) : existsCalendarFS(id);
+}
+
 // API Routes
 
 // Get calendar data
@@ -38,102 +242,70 @@ app.get('/api/calendar/:id', async (req, res) => {
     if (id === 'undefined') {
       return res.status(400).json({ error: 'Invalid calendar ID' });
     }
-    const filePath = path.join(DATA_DIR, `calendar_${id}.json`);
-    
-    try {
-      const data = await fs.readFile(filePath, 'utf8');
-      res.json(JSON.parse(data));
-    } catch (error) {
-      if (error.code === 'ENOENT') {
-        // Calendar doesn't exist, return empty state
-        res.json({
-          tasks: [],
-          meetings: [],
-          scheduledTasks: [],
-          completedTasks: [],
-          cancelledInstances: []
-        });
-      } else {
-        throw error;
-      }
-    }
+
+    const data = await loadCalendar(id);
+    res.json(data);
   } catch (error) {
     console.error('Error loading calendar:', error);
     res.status(500).json({ error: 'Failed to load calendar' });
   }
 });
 
-// Save calendar data
+// Save calendar data (with simple timestamp-based conflict detection)
 app.post('/api/calendar/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const filePath = path.join(DATA_DIR, `calendar_${id}.json`);
-    const { clientLastModified, ...newData } = req.body;
-    
-    let existingData = null;
-    let existingLastModified = null;
-    
-    // Try to read existing data
-    try {
-      const existingContent = await fs.readFile(filePath, 'utf8');
-      existingData = JSON.parse(existingContent);
-      existingLastModified = existingData.lastModified;
-    } catch (error) {
-      if (error.code !== 'ENOENT') {
-        throw error;
-      }
-      // File doesn't exist, this is a new calendar
+    if (id === 'undefined') {
+      return res.status(400).json({ error: 'Invalid calendar ID' });
     }
-    
-    // Check for conflicts if client provided their last known timestamp
+
+    const { clientLastModified, ...newData } = req.body;
+
+    // Read existing calendar (if any)
+    const { existingData, existingLastModified } = await readExistingCalendar(id);
+
+    // Conflict check (timestamp-based)
     if (clientLastModified && existingLastModified) {
       const clientTime = new Date(clientLastModified);
       const serverTime = new Date(existingLastModified);
-      
       if (serverTime > clientTime) {
-        // Server has newer data, reject the save
-        return res.status(409).json({ 
-          error: 'Conflict detected', 
+        return res.status(409).json({
+          error: 'Conflict detected',
           message: 'Calendar has been modified by another client',
           serverData: existingData,
-          serverLastModified: existingLastModified
+          serverLastModified: existingLastModified,
         });
       }
     }
-    
-    // Compare data to see if there are actual changes
+
+    // Determine if there are actual changes ignoring metadata
     let hasChanges = false;
     if (existingData) {
-      // Deep comparison of the data (excluding lastModified)
-      const existingDataForComparison = { ...existingData };
-      delete existingDataForComparison.lastModified;
-      delete existingDataForComparison.created;
-      
-      const newDataForComparison = { ...newData };
-      
-      hasChanges = JSON.stringify(existingDataForComparison) !== JSON.stringify(newDataForComparison);
+      const existingForCompare = { ...existingData };
+      delete existingForCompare.lastModified;
+      delete existingForCompare.created;
+
+      const newForCompare = { ...newData };
+      hasChanges = JSON.stringify(existingForCompare) !== JSON.stringify(newForCompare);
     } else {
-      // No existing data, so this is definitely a change
       hasChanges = true;
     }
-    
-    // Only update lastModified if there are actual changes
+
     const dataToSave = {
       ...newData,
-      lastModified: hasChanges ? new Date().toISOString() : existingLastModified,
-      created: existingData?.created || new Date().toISOString()
+      lastModified: hasChanges ? new Date().toISOString() : existingLastModified || new Date().toISOString(),
+      created: existingData?.created || new Date().toISOString(),
     };
-    
-    // Only write to file if there are changes
+
     if (hasChanges) {
-      await fs.writeFile(filePath, JSON.stringify(dataToSave, null, 2));
+      await persistCalendar(id, dataToSave);
     }
-    
-    res.json({ 
-      success: true, 
+
+    res.json({
+      success: true,
       lastModified: dataToSave.lastModified,
       hasChanges,
-      message: hasChanges ? 'Calendar updated' : 'No changes detected'
+      message: hasChanges ? 'Calendar updated' : 'No changes detected',
     });
   } catch (error) {
     console.error('Error saving calendar:', error);
@@ -147,38 +319,27 @@ app.post('/api/calendar/new', async (req, res) => {
     let id;
     let attempts = 0;
     let exists = true;
-    
+
     // Generate unique ID
     while (exists && attempts < 10) {
       id = generateCalendarId();
       attempts++;
-      
-      try {
-        await fs.access(path.join(DATA_DIR, `calendar_${id}.json`));
-        exists = true; // File exists, try again
-      } catch {
-        exists = false; // File doesn't exist, we can use this ID
-      }
+      exists = await calendarExists(id);
     }
-    
+
     if (attempts >= 10) {
       throw new Error('Failed to generate unique ID');
     }
-    
-    // Create empty calendar with current data from request body
+
+    // Create empty/seeded calendar
     const initialData = req.body || {};
-    const emptyCalendar = {
-      tasks: initialData.tasks || [],
-      meetings: initialData.meetings || [],
-      scheduledTasks: initialData.scheduledTasks || [],
-      completedTasks: initialData.completedTasks || [],
-      cancelledInstances: initialData.cancelledInstances || [],
-      created: new Date().toISOString()
+    const newCalendar = {
+      ...emptyCalendar(initialData),
+      created: new Date().toISOString(),
     };
-    
-    const filePath = path.join(DATA_DIR, `calendar_${id}.json`);
-    await fs.writeFile(filePath, JSON.stringify(emptyCalendar, null, 2));
-    
+
+    await persistCalendar(id, newCalendar);
+
     res.json({ id, success: true });
   } catch (error) {
     console.error('Error creating calendar:', error);
@@ -189,12 +350,16 @@ app.post('/api/calendar/new', async (req, res) => {
 // List all calendars (for admin/debugging)
 app.get('/api/calendars', async (req, res) => {
   try {
-    const files = await fs.readdir(DATA_DIR);
-    const calendars = files
-      .filter(file => file.startsWith('calendar_') && file.endsWith('.json'))
-      .map(file => file.replace('calendar_', '').replace('.json', ''));
-    
-    res.json({ calendars });
+    if (USE_R2) {
+      const calendars = await listCalendarsR2();
+      return res.json({ calendars });
+    } else {
+      const files = await fs.readdir(DATA_DIR);
+      const calendars = files
+        .filter((file) => file.startsWith('calendar_') && file.endsWith('.json'))
+        .map((file) => file.replace('calendar_', '').replace('.json', ''));
+      return res.json({ calendars });
+    }
   } catch (error) {
     console.error('Error listing calendars:', error);
     res.status(500).json({ error: 'Failed to list calendars' });
@@ -208,10 +373,19 @@ app.get('*', (req, res) => {
 
 // Start server
 async function startServer() {
-  await ensureDataDir();
+  if (!USE_R2) {
+    await ensureDataDir();
+  }
   app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
-    console.log(`Data directory: ${DATA_DIR}`);
+    if (USE_R2) {
+      console.log('Storage: Cloudflare R2 (S3-compatible)');
+      console.log(`R2 Bucket: ${R2_BUCKET}`);
+      console.log(`R2 Endpoint: ${R2_S3_ENDPOINT}`);
+    } else {
+      console.log('Storage: Local filesystem');
+      console.log(`Data directory: ${DATA_DIR}`);
+    }
   });
 }
 

@@ -23,8 +23,13 @@ Files included:
    - Instance size: `Micro` is fine for small apps
    - Ports: Koyeb will auto-detect HTTP port. The container listens on `$PORT` (dynamically set by Koyeb).
    - Health Check: HTTP, Path: `/`
-6. **Environment variables** (optional): 
+6. **Environment variables**:
    - `NODE_ENV=production` (already set in Dockerfile)
+   - `R2_ACCOUNT_ID=<your_cloudflare_account_id>`
+   - `R2_ACCESS_KEY_ID=<your_r2_access_key_id>`
+   - `R2_SECRET_ACCESS_KEY=<your_r2_secret_access_key>`
+   - `R2_BUCKET=<your_bucket_name>`
+   - `R2_S3_ENDPOINT=<optional_custom_endpoint>` (optional; defaults to `https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com`)
 7. **Click Deploy**. Koyeb will clone, build, and run the service.
 
 ## Enable Auto-Deploys
@@ -44,6 +49,38 @@ docker build -t todo-cal .
 docker run -p 3001:3001 -e PORT=3001 todo-cal
 # Open http://localhost:3001
 ```
+
+## Cloudflare R2 Persistence (Recommended for Production)
+
+This app can persist calendar JSON in Cloudflare R2 (S3-compatible) so data survives Koyeb redeploys.
+
+1) Create R2 bucket and credentials
+- In Cloudflare dashboard: R2 → Create bucket (e.g., `todo-cal`).
+- Create an API token with permissions to read/write your bucket:
+  - R2 → Manage R2 API Tokens → Create API Token → Permissions: Object Read and Object Write for your bucket (or “Edit” for the bucket).
+  - Save the Access Key ID and Secret Access Key.
+- Find your Cloudflare Account ID (R2 dashboard → Overview).
+
+2) Configure Koyeb environment variables (App → Service → Settings → Environment variables)
+- R2_ACCOUNT_ID: your Cloudflare Account ID
+- R2_ACCESS_KEY_ID: Access key ID from step 1
+- R2_SECRET_ACCESS_KEY: Secret access key from step 1
+- R2_BUCKET: your bucket name
+- R2_S3_ENDPOINT (optional): S3 endpoint. If omitted, the app derives `https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com`
+
+3) Deploy
+- The server auto-detects R2 when the above environment variables are present and will:
+  - Read calendar JSON from `s3://R2_BUCKET/calendar_<id>.json`
+  - Write updates back to R2
+- Check logs after deploy; you should see:
+  - `Storage: Cloudflare R2 (S3-compatible)`
+  - Bucket and endpoint info
+
+Notes and best practices
+- Do not expose R2 credentials to the browser; the server proxies all access.
+- The API supports basic conflict detection using a `lastModified` timestamp field in the JSON.
+- If no object exists for a calendar ID, the server returns an empty calendar schema; the first save will create it.
+- For local development without R2 env vars, the server falls back to local filesystem under `data/`.
 
 ## App Features
 

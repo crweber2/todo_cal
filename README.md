@@ -80,8 +80,11 @@ npm run server        # Start production server on port 3001
 
 ## Data Storage
 
-**Server-side:** JSON files in `/data/` directory
-- `calendar_001.json`, `calendar_002.json`, etc.
+**Server-side:**
+- Cloudflare R2 (S3-compatible) when configured via environment variables:
+  - `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`, optional `R2_S3_ENDPOINT`
+  - Objects stored as `calendar_<id>.json`
+- Fallback to local JSON files in `/data/` when R2 is not configured
 
 **Client-side backup:** localStorage keys
 - `todo-tasks`, `todo-meetings`, `todo-scheduledTasks`, `todo-completedTasks`, `todo-cancelledInstances`
