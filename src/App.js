@@ -1,15 +1,46 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Clock, Plus, X, Check, Edit2, Calendar, ChevronLeft, ChevronRight, GripVertical, Repeat, FileText, ArrowUp, ArrowDown, Eye, Zap, Bell, BellOff } from 'lucide-react';
+import { Clock, Plus, X, Check, Edit2, Calendar, ChevronLeft, ChevronRight, GripVertical, Repeat, FileText, ArrowUp, ArrowDown, Eye, Zap, Bell, BellOff, Menu } from 'lucide-react';
+
+// Custom hook for mobile detection
+const useIsMobile = () => {
+  const [isMobile, setIsMobile] = useState(false);
+
+  useEffect(() => {
+    const checkIsMobile = () => {
+      const width = window.innerWidth;
+      const hasTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+      const userAgent = navigator.userAgent.toLowerCase();
+      const isMobileUA = /android|webos|iphone|ipad|ipod|blackberry|iemobile|opera mini/i.test(userAgent);
+      
+      // Consider mobile if screen width < 768px OR has touch + mobile user agent
+      setIsMobile(width < 768 || (hasTouch && isMobileUA && width < 1024));
+    };
+
+    checkIsMobile();
+    window.addEventListener('resize', checkIsMobile);
+    return () => window.removeEventListener('resize', checkIsMobile);
+  }, []);
+
+  return isMobile;
+};
 
 const TodoCalendarApp = () => {
+  // Mobile detection
+  const isMobile = useIsMobile();
+  
+  // Mobile-specific state
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [touchDragState, setTouchDragState] = useState(null);
+  const [swipeState, setSwipeState] = useState(null);
+  
   // Calendar sync state
   const [calendarId, setCalendarId] = useState(null);
   const [isOnline, setIsOnline] = useState(true);
   const [lastSaved, setLastSaved] = useState(null);
   const [saveStatus, setSaveStatus] = useState('saved'); // 'saving', 'saved', 'error'
 
-  // View state
-  const [viewMode, setViewMode] = useState('week'); // 'day' or 'week'
+  // View state - default to day view on mobile
+  const [viewMode, setViewMode] = useState(() => isMobile ? 'day' : 'week');
   const [selectedDay, setSelectedDay] = useState(0); // For day view
 
   // Initialize from localStorage or server
@@ -826,8 +857,139 @@ const TodoCalendarApp = () => {
     setEditingItem(newTask);
   };
 
+  // Touch drag handlers for mobile
+  const handleTouchStart = (e, item, source) => {
+    if (!isMobile) return;
+    
+    const touch = e.touches[0];
+    setTouchDragState({
+      item: { ...item, source },
+      startX: touch.clientX,
+      startY: touch.clientY,
+      currentX: touch.clientX,
+      currentY: touch.clientY,
+      isDragging: false,
+      longPressTimer: setTimeout(() => {
+        setTouchDragState(prev => prev ? { ...prev, isDragging: true } : null);
+        // Haptic feedback if available
+        if (navigator.vibrate) {
+          navigator.vibrate(50);
+        }
+      }, 500) // 500ms long press
+    });
+  };
+
+  const handleTouchMove = (e, item, source) => {
+    if (!isMobile || !touchDragState) return;
+    
+    e.preventDefault();
+    const touch = e.touches[0];
+    
+    setTouchDragState(prev => ({
+      ...prev,
+      currentX: touch.clientX,
+      currentY: touch.clientY
+    }));
+  };
+
+  const handleTouchEnd = (e, item, source) => {
+    if (!isMobile || !touchDragState) return;
+    
+    clearTimeout(touchDragState.longPressTimer);
+    
+    if (touchDragState.isDragging) {
+      // Find drop target based on touch position
+      const elementBelow = document.elementFromPoint(touchDragState.currentX, touchDragState.currentY);
+      
+      if (elementBelow) {
+        // Check if dropped on calendar
+        const calendarCell = elementBelow.closest('[data-calendar-cell]');
+        if (calendarCell) {
+          const day = parseInt(calendarCell.dataset.day);
+          const hour = parseInt(calendarCell.dataset.hour);
+          
+          // Simulate drop event
+          const syntheticEvent = {
+            preventDefault: () => {},
+            clientY: touchDragState.currentY,
+            currentTarget: calendarCell
+          };
+          
+          setDraggedItem(touchDragState.item);
+          handleEnhancedDrop(syntheticEvent, day, hour);
+        }
+      }
+    } else {
+      // Short tap - edit item
+      handleEditItem(item);
+    }
+    
+    setTouchDragState(null);
+  };
+
+  // Swipe navigation handlers for mobile
+  const handleSwipeStart = (e) => {
+    if (!isMobile || viewMode !== 'day') return;
+    
+    const touch = e.touches[0];
+    setSwipeState({
+      startX: touch.clientX,
+      startY: touch.clientY,
+      startTime: Date.now()
+    });
+  };
+
+  const handleSwipeMove = (e) => {
+    if (!isMobile || !swipeState || viewMode !== 'day') return;
+    
+    const touch = e.touches[0];
+    const deltaX = touch.clientX - swipeState.startX;
+    const deltaY = touch.clientY - swipeState.startY;
+    
+    // If vertical movement is greater than horizontal, don't interfere with scrolling
+    if (Math.abs(deltaY) > Math.abs(deltaX)) {
+      return;
+    }
+    
+    // Prevent horizontal scrolling during swipe
+    if (Math.abs(deltaX) > 10) {
+      e.preventDefault();
+    }
+  };
+
+  const handleSwipeEnd = (e) => {
+    if (!isMobile || !swipeState || viewMode !== 'day') return;
+    
+    const touch = e.changedTouches[0];
+    const deltaX = touch.clientX - swipeState.startX;
+    const deltaY = touch.clientY - swipeState.startY;
+    const deltaTime = Date.now() - swipeState.startTime;
+    
+    // Only process swipe if it's primarily horizontal and fast enough
+    if (Math.abs(deltaX) > Math.abs(deltaY) && 
+        Math.abs(deltaX) > 50 && 
+        deltaTime < 500) {
+      
+      if (deltaX > 0) {
+        // Swipe right - go to previous day
+        handleDayNavigation('prev');
+      } else {
+        // Swipe left - go to next day
+        handleDayNavigation('next');
+      }
+      
+      // Haptic feedback for successful swipe
+      if (navigator.vibrate) {
+        navigator.vibrate(30);
+      }
+    }
+    
+    setSwipeState(null);
+  };
+
   // Enhanced drag handlers with shift-copy functionality
   const handleEnhancedDragStart = (e, item, source) => {
+    if (isMobile) return; // Use touch handlers on mobile
     setDraggedItem({ ...item, source });
     e.dataTransfer.effectAllowed = 'copyMove';
   };
@@ -1235,15 +1397,25 @@ const TodoCalendarApp = () => {
   };
 
   return (
-    <div className="h-screen bg-gray-50 p-4 flex flex-col">
+    <div className={`h-screen bg-gray-50 ${isMobile ? 'p-2' : 'p-4'} flex flex-col`}>
       <div className="w-full mx-auto flex-1 flex flex-col min-h-0">
         
         {/* Status Bar */}
         <div className="bg-white rounded-lg shadow-md p-4 mb-4">
           <div className="flex justify-between items-start">
-            <div className="flex gap-4 flex-1">
+            {/* Mobile hamburger menu */}
+            {isMobile && (
+              <button
+                onClick={() => setSidebarOpen(!sidebarOpen)}
+                className="p-2 bg-gray-100 rounded-lg hover:bg-gray-200 mr-3 md:hidden"
+              >
+                <Menu className="w-5 h-5" />
+              </button>
+            )}
+            
+            <div className={`flex ${isMobile ? 'flex-col gap-2' : 'gap-4'} flex-1`}>
               <div 
-                className="bg-blue-50 rounded-lg p-3 flex-1 cursor-pointer hover:bg-blue-100 transition-colors"
+                className={`bg-blue-50 rounded-lg p-3 ${isMobile ? 'w-full' : 'flex-1'} cursor-pointer hover:bg-blue-100 transition-colors`}
                 onDoubleClick={() => {
                   if (currentTasks.length > 0) {
                     handleEditItem(currentTasks[0]);
@@ -1253,7 +1425,7 @@ const TodoCalendarApp = () => {
                 <div className="flex justify-between items-start">
                   <div className="flex-1">
                     <div className="text-sm text-blue-600 font-semibold mb-1">Current Task</div>
-                    <div className="text-lg font-bold text-blue-900">
+                    <div className={`${isMobile ? 'text-base' : 'text-lg'} font-bold text-blue-900`}>
                       {currentTasks.length === 0 ? 'No active task' : 
                        currentTasks.length === 1 ? currentTasks[0].name :
                        `${currentTasks[0].name} + ${currentTasks.length - 1} more`}
@@ -1264,54 +1436,59 @@ const TodoCalendarApp = () => {
                       </div>
                     )}
                   </div>
-                  {currentTasks.length > 0 && currentTasks[0].notes && (
+                  {!isMobile && currentTasks.length > 0 && currentTasks[0].notes && (
                     <div className="ml-3 text-xs text-blue-700 max-w-xs h-full flex items-start">
                       <div className="break-words whitespace-pre-wrap">{currentTasks[0].notes}</div>
                     </div>
                   )}
                 </div>
               </div>
-              <div 
-                className="bg-green-50 rounded-lg p-3 flex-1 cursor-pointer hover:bg-green-100 transition-colors"
-                onDoubleClick={() => {
-                  if (nextTask) {
-                    handleEditItem(nextTask);
-                  }
-                }}
-              >
-                <div className="flex justify-between items-start">
-                  <div className="flex-1">
-                    <div className="text-sm text-green-600 font-semibold mb-1">Next Task</div>
-                    <div className="text-lg font-bold text-green-900">
-                      {nextTask ? `${nextTask.name} at ${formatTime(nextTask.startTime)}` : 'No upcoming task'}
+              
+              {/* Hide next task on very small screens */}
+              {(!isMobile || window.innerWidth > 480) && (
+                <div 
+                  className={`bg-green-50 rounded-lg p-3 ${isMobile ? 'w-full' : 'flex-1'} cursor-pointer hover:bg-green-100 transition-colors`}
+                  onDoubleClick={() => {
+                    if (nextTask) {
+                      handleEditItem(nextTask);
+                    }
+                  }}
+                >
+                  <div className="flex justify-between items-start">
+                    <div className="flex-1">
+                      <div className="text-sm text-green-600 font-semibold mb-1">Next Task</div>
+                      <div className={`${isMobile ? 'text-base' : 'text-lg'} font-bold text-green-900`}>
+                        {nextTask ? `${nextTask.name} at ${formatTime(nextTask.startTime)}` : 'No upcoming task'}
+                      </div>
                     </div>
+                    {!isMobile && nextTask && nextTask.notes && (
+                      <div className="ml-3 text-xs text-green-700 max-w-xs h-full flex items-start">
+                        <div className="break-words whitespace-pre-wrap">{nextTask.notes}</div>
+                      </div>
+                    )}
                   </div>
-                  {nextTask && nextTask.notes && (
-                    <div className="ml-3 text-xs text-green-700 max-w-xs h-full flex items-start">
-                      <div className="break-words whitespace-pre-wrap">{nextTask.notes}</div>
-                    </div>
-                  )}
                 </div>
-              </div>
+              )}
             </div>
-            <div className="flex flex-col gap-2 ml-4">
+            
+            <div className={`flex ${isMobile ? 'flex-row gap-2' : 'flex-col gap-2'} ml-4`}>
               <button
                 onClick={() => setChimeEnabled(!chimeEnabled)}
-                className="p-2 bg-white border-2 rounded-lg hover:bg-gray-50 flex items-center h-8 w-8 justify-center"
+                className={`p-2 bg-white border-2 rounded-lg hover:bg-gray-50 flex items-center ${isMobile ? 'h-10 w-10' : 'h-8 w-8'} justify-center`}
                 style={{
                   borderColor: chimeEnabled ? '#10B981' : '#6B7280'
                 }}
                 title={chimeEnabled ? 'Chime notifications enabled - click to disable' : 'Chime notifications disabled - click to enable'}
               >
                 {chimeEnabled ? (
-                  <Bell className="w-3 h-3 text-green-600" />
+                  <Bell className={`${isMobile ? 'w-4 h-4' : 'w-3 h-3'} text-green-600`} />
                 ) : (
-                  <BellOff className="w-3 h-3 text-gray-500" />
+                  <BellOff className={`${isMobile ? 'w-4 h-4' : 'w-3 h-3'} text-gray-500`} />
                 )}
               </button>
               <button
                 onClick={() => setShowDebugModal(true)}
-                className="p-2 bg-white border-2 rounded-lg hover:bg-gray-50 flex items-center h-8 w-8 justify-center"
+                className={`p-2 bg-white border-2 rounded-lg hover:bg-gray-50 flex items-center ${isMobile ? 'h-10 w-10' : 'h-8 w-8'} justify-center`}
                 style={{
                   borderColor: !isOnline ? '#EF4444' : 
                               saveStatus === 'saving' ? '#F59E0B' : 
@@ -1319,15 +1496,28 @@ const TodoCalendarApp = () => {
                 }}
                 title="Debug Information"
               >
-                <span className="text-xs font-bold">?</span>
+                <span className={`${isMobile ? 'text-sm' : 'text-xs'} font-bold`}>?</span>
               </button>
             </div>
           </div>
         </div>
 
-        <div className="grid grid-cols-12 gap-6 flex-1 min-h-0">
+        {/* Mobile Sidebar Overlay */}
+        {isMobile && sidebarOpen && (
+          <div 
+            className="fixed inset-0 bg-black bg-opacity-50 z-40"
+            onClick={() => setSidebarOpen(false)}
+          />
+        )}
+
+        <div className={`${isMobile ? 'flex flex-col' : 'grid grid-cols-12 gap-6'} flex-1 min-h-0`}>
           {/* Left Sidebar - Unscheduled Tasks */}
-          <div className="col-span-3 flex flex-col gap-4 min-h-0">
+          <div className={`${isMobile ? 
+            `fixed inset-y-0 left-0 z-50 w-80 bg-white shadow-lg transform transition-transform duration-300 ease-in-out ${
+              sidebarOpen ? 'translate-x-0' : '-translate-x-full'
+            }` : 
+            'col-span-3'
+          } flex flex-col gap-4 min-h-0 ${isMobile ? 'pt-4' : ''}`}>
             <div 
               className="bg-white rounded-lg shadow-md p-4 flex-1 flex flex-col min-h-0"
               onDragOver={handleDragOver}
@@ -1455,34 +1645,36 @@ const TodoCalendarApp = () => {
           </div>
 
           {/* Calendar View */}
-          <div className="col-span-9 flex flex-col">
+          <div className={`${isMobile ? 'flex-1' : 'col-span-9'} flex flex-col`}>
             <div className="bg-white rounded-lg shadow-md p-4 flex-1 flex flex-col">
-              <div className="flex justify-between items-center mb-2">
-                <div className="flex items-center gap-4">
+              <div className={`flex ${isMobile ? 'flex-col gap-3' : 'justify-between items-center'} mb-2`}>
+                <div className={`flex ${isMobile ? 'justify-between' : 'items-center gap-4'}`}>
                   <div className="flex items-center gap-2">
                     <div className="flex bg-gray-100 rounded-lg p-1">
                       <button
                         onClick={() => setViewMode('day')}
-                        className={`px-3 py-1 text-sm rounded ${viewMode === 'day' ? 'bg-white shadow-sm' : 'hover:bg-gray-200'}`}
+                        className={`${isMobile ? 'px-2 py-1' : 'px-3 py-1'} text-sm rounded ${viewMode === 'day' ? 'bg-white shadow-sm' : 'hover:bg-gray-200'}`}
                       >
                         <Eye className="w-4 h-4 inline mr-1" />
                         Day
                       </button>
-                      <button
-                        onClick={() => setViewMode('week')}
-                        className={`px-3 py-1 text-sm rounded ${viewMode === 'week' ? 'bg-white shadow-sm' : 'hover:bg-gray-200'}`}
-                      >
-                        <Calendar className="w-4 h-4 inline mr-1" />
-                        Week
-                      </button>
+                      {!isMobile && (
+                        <button
+                          onClick={() => setViewMode('week')}
+                          className={`px-3 py-1 text-sm rounded ${viewMode === 'week' ? 'bg-white shadow-sm' : 'hover:bg-gray-200'}`}
+                        >
+                          <Calendar className="w-4 h-4 inline mr-1" />
+                          Week
+                        </button>
+                      )}
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
                     <button
                       onClick={() => viewMode === 'day' ? handleDayNavigation('prev') : setWeekOffset(prev => prev - 1)}
-                      className="p-1 hover:bg-gray-100 rounded"
+                      className={`${isMobile ? 'p-2' : 'p-1'} hover:bg-gray-100 rounded`}
                     >
-                      <ChevronLeft className="w-5 h-5" />
+                      <ChevronLeft className={`${isMobile ? 'w-6 h-6' : 'w-5 h-5'}`} />
                     </button>
                     <button
                       onClick={() => {
@@ -1493,38 +1685,47 @@ const TodoCalendarApp = () => {
                           setSelectedDay(Math.max(0, Math.min(4, currentDay)));
                         }
                       }}
-                      className="px-3 py-1 text-sm bg-gray-100 rounded hover:bg-gray-200"
+                      className={`${isMobile ? 'px-4 py-2' : 'px-3 py-1'} text-sm bg-gray-100 rounded hover:bg-gray-200`}
                     >
                       Today
                     </button>
                     <button
                       onClick={() => viewMode === 'day' ? handleDayNavigation('next') : setWeekOffset(prev => prev + 1)}
-                      className="p-1 hover:bg-gray-100 rounded"
+                      className={`${isMobile ? 'p-2' : 'p-1'} hover:bg-gray-100 rounded`}
                     >
-                      <ChevronRight className="w-5 h-5" />
+                      <ChevronRight className={`${isMobile ? 'w-6 h-6' : 'w-5 h-5'}`} />
                     </button>
                   </div>
-                  {viewMode === 'day' && currentDate && (
-                    <div className="text-lg font-medium text-gray-700">
-                      {currentDate.toLocaleDateString('en-US', { 
-                        weekday: 'long', 
-                        month: 'long', 
-                        day: 'numeric' 
-                      })}
-                    </div>
-                  )}
                 </div>
+                
+                {viewMode === 'day' && currentDate && (
+                  <div className={`${isMobile ? 'text-center text-base' : 'text-lg'} font-medium text-gray-700`}>
+                    {currentDate.toLocaleDateString('en-US', { 
+                      weekday: 'long', 
+                      month: 'long', 
+                      day: 'numeric' 
+                    })}
+                  </div>
+                )}
+                
                 <button
                   onClick={() => setShowMeetingModal(true)}
-                  className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 flex items-center gap-2"
+                  className={`${isMobile ? 'px-3 py-2 text-sm' : 'px-4 py-2'} bg-red-500 text-white rounded-lg hover:bg-red-600 flex items-center gap-2 ${isMobile ? 'self-end' : ''}`}
                 >
                   <Calendar className="w-4 h-4" />
-                  Add Meeting
+                  {isMobile ? 'Meeting' : 'Add Meeting'}
                 </button>
               </div>
-              <div className="text-xs text-gray-500 mb-2">Double-click to add meeting • Drag to reschedule • Drag bottom edge to resize • Double-click to edit</div>
+              <div className={`${isMobile ? 'text-xs' : 'text-xs'} text-gray-500 mb-2`}>
+                {isMobile ? 'Tap to edit • Long press to drag • Swipe left/right to navigate days' : 'Double-click to add meeting • Drag to reschedule • Drag bottom edge to resize • Double-click to edit'}
+              </div>
               
-              <div className="flex-1 overflow-auto">
+              <div 
+                className="flex-1 overflow-auto"
+                onTouchStart={handleSwipeStart}
+                onTouchMove={handleSwipeMove}
+                onTouchEnd={handleSwipeEnd}
+              >
                 <div className={`grid gap-1 min-w-[800px] ${viewMode === 'day' ? 'grid-cols-[80px_1fr]' : 'grid-cols-[80px_repeat(5,1fr)]'}`}>
                   <div className="text-sm font-semibold text-gray-600 p-1 text-center sticky top-0 bg-white z-20">Time</div>
                   {viewMode === 'day' ? (
