@@ -1556,9 +1556,21 @@ const TodoCalendarApp = () => {
                     }}
                     onDragOver={handleTaskDragOver}
                     onDrop={(e) => handleTaskDrop(e, index)}
+                    onTouchStart={(e) => handleTouchStart(e, task, 'unscheduled')}
+                    onTouchMove={(e) => handleTouchMove(e, task, 'unscheduled')}
+                    onTouchEnd={(e) => handleTouchEnd(e, task, 'unscheduled')}
                     onDoubleClick={() => handleEditItem(task)}
-                    className="p-3 rounded-lg hover:shadow-lg transition-shadow cursor-move"
-                    style={{ backgroundColor: task.color + '20', borderLeft: `4px solid ${task.color}` }}
+                    className={`p-3 rounded-lg hover:shadow-lg transition-shadow cursor-move ${isMobile ? 'select-none touch-none' : ''}`}
+                    style={{ 
+                      backgroundColor: task.color + '20', 
+                      borderLeft: `4px solid ${task.color}`,
+                      ...(isMobile ? { 
+                        userSelect: 'none', 
+                        WebkitUserSelect: 'none',
+                        touchAction: 'none',
+                        WebkitTouchCallout: 'none'
+                      } : {})
+                    }}
                   >
                     <div className="flex justify-between items-start">
                       <div className="flex-1">
@@ -1726,7 +1738,7 @@ const TodoCalendarApp = () => {
                 onTouchMove={handleSwipeMove}
                 onTouchEnd={handleSwipeEnd}
               >
-                <div className={`grid gap-1 min-w-[800px] ${viewMode === 'day' ? 'grid-cols-[80px_1fr]' : 'grid-cols-[80px_repeat(5,1fr)]'}`}>
+                <div className={`grid gap-1 ${isMobile && viewMode === 'day' ? '' : 'min-w-[800px]'} ${viewMode === 'day' ? 'grid-cols-[80px_1fr]' : 'grid-cols-[80px_repeat(5,1fr)]'}`}>
                   <div className="text-sm font-semibold text-gray-600 p-1 text-center sticky top-0 bg-white z-20">Time</div>
                   {viewMode === 'day' ? (
                     <div className="text-sm font-semibold text-gray-700 p-2 text-center sticky top-0 bg-white z-20">
@@ -1757,10 +1769,16 @@ const TodoCalendarApp = () => {
                         return (
                           <div
                             key={`${hour}-${dayIndex}`}
+                            data-calendar-cell
+                            data-day={dayIndex}
+                            data-hour={hour}
                             className={`border-t border-l border-gray-200 relative hover:bg-gray-50 ${
                               isTimeSlotPast(dayIndex, hour) ? 'bg-gray-100' : ''
                             }`}
-                            style={{ height: `${pixelsPerHour}px` }}
+                            style={{ 
+                              height: `${pixelsPerHour}px`,
+                              ...(isMobile ? { touchAction: 'pan-y', userSelect: 'none', WebkitUserSelect: 'none' } : {})
+                            }}
                             onDragOver={handleDragOver}
                             onDrop={(e) => handleEnhancedDrop(e, dayIndex, hour)}
                             onDoubleClick={(e) => handleDoubleClickCalendar(e, dayIndex, hour)}
@@ -1803,18 +1821,27 @@ const TodoCalendarApp = () => {
                                     key={`${item.id}-${item.instanceKey || ''}`}
                                     draggable
                                     onDragStart={(e) => handleEnhancedDragStart(e, item, isMeeting ? 'meeting' : 'scheduled')}
+                                    onTouchStart={(e) => handleTouchStart(e, item, isMeeting ? 'meeting' : 'scheduled')}
+                                    onTouchMove={(e) => handleTouchMove(e, item, isMeeting ? 'meeting' : 'scheduled')}
+                                    onTouchEnd={(e) => handleTouchEnd(e, item, isMeeting ? 'meeting' : 'scheduled')}
                                     onDoubleClick={(e) => {
                                       e.stopPropagation();
                                       handleEditItem(item);
                                     }}
-                                    className="absolute p-1 cursor-move group overflow-hidden rounded"
+                                    className={`absolute p-1 cursor-move group overflow-hidden rounded ${isMobile ? 'select-none touch-none' : ''}`}
                                     style={{
                                       top: `${minuteOffset}px`,
                                       left,
                                       width,
                                       height: `${minHeight}px`,
                                       backgroundColor: item.color + 'DD',
-                                      zIndex: 50 + (item.column || 0)
+                                      zIndex: 50 + (item.column || 0),
+                                      ...(isMobile ? {
+                                        userSelect: 'none',
+                                        WebkitUserSelect: 'none',
+                                        touchAction: 'none',
+                                        WebkitTouchCallout: 'none'
+                                      } : {})
                                     }}
                                   >
                                     <div className="text-white text-xs font-semibold h-full relative flex flex-col">
