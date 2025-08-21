@@ -97,6 +97,11 @@ const TodoCalendarApp = () => {
   // Color mapping for consistent task colors based on first word
   const [colorMap, setColorMap] = useState(() => loadFromStorage('todo-colorMap', {}));
 
+  // Utility to create a unique occurrence ID for a scheduled instance
+  const createOccurrenceId = useCallback((base = 'occ') => {
+    return `${base}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  }, []);
+
   // Check for calendar ID in URL on load, default to "001"
   useEffect(() => {
     const urlParams = new URLSearchParams(window.location.search);
@@ -114,6 +119,14 @@ const TodoCalendarApp = () => {
     loadCalendarFromServer(validId);
   }, []);
 
+  // Migration: Ensure each scheduled task instance has an occurrenceId so we can manipulate instances independently
+  useEffect(() => {
+    const needsMigration = scheduledTasks.some(t => !t.occurrenceId);
+    if (needsMigration) {
+      setScheduledTasks(prev => prev.map(t => t.occurrenceId ? t : { ...t, occurrenceId: createOccurrenceId(String(t.id)) }));
+    }
+  }, [scheduledTasks, createOccurrenceId]);
+
   // Server sync functions
   const loadCalendarFromServer = async (id) => {
     try {
@@ -125,7 +138,9 @@ const TodoCalendarApp = () => {
         console.log('Calendar data loaded:', data);
         setTasks(data.tasks || []);
         setMeetings(data.meetings || []);
-        setScheduledTasks(data.scheduledTasks || []);
+        // Ensure server-loaded scheduled tasks also get occurrenceId
+        const loadedScheduled = (data.scheduledTasks || []).map(t => t.occurrenceId ? t : { ...t, occurrenceId: `${t.id || 'occ'}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}` });
+        setScheduledTasks(loadedScheduled);
         setCompletedTasks(data.completedTasks || []);
         setCancelledInstances(new Set(data.cancelledInstances || []));
         setLastSaved(data.lastModified);
@@ -230,7 +245,7 @@ const TodoCalendarApp = () => {
             console.log('Reloading server data due to conflict...');
             setTasks(conflictData.serverData.tasks || []);
             setMeetings(conflictData.serverData.meetings || []);
-            setScheduledTasks(conflictData.serverData.scheduledTasks || []);
+            setScheduledTasks((conflictData.serverData.scheduledTasks || []).map(t => t.occurrenceId ? t : { ...t, occurrenceId: `${t.id || 'occ'}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}` }));
             setCompletedTasks(conflictData.serverData.completedTasks || []);
             setCancelledInstances(new Set(conflictData.serverData.cancelledInstances || []));
             setLastSaved(conflictData.serverLastModified);
@@ -679,9 +694,8 @@ const TodoCalendarApp = () => {
     if (!draggedItem) return;
 
     if (draggedItem.source === 'scheduled') {
-      setScheduledTasks(prev => prev.filter(t => 
-        !(t.id === draggedItem.id && t.weekOffset === draggedItem.weekOffset)
-      ));
+      // Remove only the dragged occurrence (not all with same id)
+      setScheduledTasks(prev => prev.filter(t => t.occurrenceId !== draggedItem.occurrenceId));
     }
 
     setDraggedItem(null);
@@ -692,16 +706,14 @@ const TodoCalendarApp = () => {
     if (!draggedItem) return;
 
     if (draggedItem.source === 'scheduled') {
-      const task = scheduledTasks.find(t => 
-        t.id === draggedItem.id && t.weekOffset === draggedItem.weekOffset
-      );
-      if (task) {
-        setScheduledTasks(prev => prev.filter(t => 
-          !(t.id === draggedItem.id && t.weekOffset === draggedItem.weekOffset)
-        ));
+      // Complete the linked task: remove all instances of this id for this week and add a single completed entry
+      const anyInstance = scheduledTasks.find(t => t.id === draggedItem.id && t.weekOffset === draggedItem.weekOffset);
+      if (anyInstance) {
+        setScheduledTasks(prev => prev.filter(t => !(t.id === draggedItem.id && t.weekOffset === draggedItem.weekOffset)));
+        const lastDate = getLastOccurrenceDateForTask(anyInstance.id);
         setCompletedTasks(prev => {
-          const exists = prev.some(t => t.id === task.id);
-          return exists ? prev : [...prev, { ...task, completedAt: new Date() }];
+          const exists = prev.some(t => t.id === anyInstance.id);
+          return exists ? prev : [...prev, { ...anyInstance, completedAt: lastDate }];
         });
       }
     } else if (draggedItem.source === 'unscheduled') {
@@ -739,8 +751,9 @@ const TodoCalendarApp = () => {
         const newDuration = Math.max(15, resizingItem.originalDuration + durationChange);
         
         if (resizingItem.type === 'task') {
+          // Resize only this occurrence
           setScheduledTasks(prev => prev.map(t => 
-            t.id === resizingItem.item.id && t.weekOffset === resizingItem.item.weekOffset
+            t.occurrenceId === resizingItem.item.occurrenceId
               ? { ...t, duration: newDuration } 
               : t
           ));
@@ -767,29 +780,30 @@ const TodoCalendarApp = () => {
   }, [resizingItem, pixelsPerHour]);
 
   const handleCompleteTask = (taskId) => {
+    // Find any instance for this week
     const task = scheduledTasks.find(t => t.id === taskId && t.weekOffset === weekOffset);
     if (task) {
-      setScheduledTasks(prev => prev.filter(t => 
-        !(t.id === taskId && t.weekOffset === weekOffset)
-      ));
-      setCompletedTasks(prev => [...prev, { ...task, completedAt: new Date() }]);
+      // Remove all instances with the same id in this week
+      setScheduledTasks(prev => prev.filter(t => !(t.id === taskId && t.weekOffset === weekOffset)));
+      // Add only one completion entry (attribute to the last scheduled occurrence date)
+      const lastDate = getLastOccurrenceDateForTask(taskId);
+      setCompletedTasks(prev => {
+        const exists = prev.some(t => t.id === task.id);
+        return exists ? prev : [...prev, { ...task, completedAt: lastDate }];
+      });
     }
   };
 
-  const handleUnscheduleTask = (taskId) => {
-    // Find the task in scheduled tasks
-    const task = scheduledTasks.find(t => t.id === taskId && t.weekOffset === weekOffset);
+  const handleUnscheduleTask = (taskId, occurrenceId) => {
+    // Remove only this occurrence from scheduled tasks
+    const task = scheduledTasks.find(t => t.occurrenceId === occurrenceId);
     if (task) {
-      // Remove from scheduled tasks
-      setScheduledTasks(prev => prev.filter(t => 
-        !(t.id === taskId && t.weekOffset === weekOffset)
-      ));
+      setScheduledTasks(prev => prev.filter(t => t.occurrenceId !== occurrenceId));
       
       // Check if this task exists in the main tasks array
       const existsInTasks = tasks.some(t => t.id === taskId);
       if (!existsInTasks) {
-        // If it doesn't exist in tasks (like right-click created tasks), add it there
-        const { day, startTime, weekOffset: _, ...taskWithoutScheduleInfo } = task;
+        const { day, startTime, weekOffset: _, occurrenceId: __, ...taskWithoutScheduleInfo } = task;
         setTasks(prev => [...prev, taskWithoutScheduleInfo]);
       }
     }
@@ -812,9 +826,10 @@ const TodoCalendarApp = () => {
       } else {
         // Strike through: add to struck through tasks and completed tasks
         setStruckThroughTasks(prev => new Set([...prev, taskId]));
+        const lastDate = getLastOccurrenceDateForTask(task.id);
         setCompletedTasks(prev => {
           const exists = prev.some(t => t.id === task.id);
-          return exists ? prev : [...prev, { ...task, completedAt: new Date() }];
+          return exists ? prev : [...prev, { ...task, completedAt: lastDate }];
         });
       }
     }
@@ -830,6 +845,11 @@ const TodoCalendarApp = () => {
       newSet.delete(taskId);
       return newSet;
     });
+  };
+
+  const handleDeleteOccurrence = (taskId, occurrenceId) => {
+    // Remove only this scheduled instance
+    setScheduledTasks(prev => prev.filter(t => !(t.id === taskId && t.occurrenceId === occurrenceId)));
   };
 
   // Right-click context menu handler
@@ -912,7 +932,8 @@ const TodoCalendarApp = () => {
           const syntheticEvent = {
             preventDefault: () => {},
             clientY: touchDragState.currentY,
-            currentTarget: calendarCell
+            currentTarget: calendarCell,
+            shiftKey: false // Mobile: no shift-duplicate
           };
           
           setDraggedItem(touchDragState.item);
@@ -990,6 +1011,7 @@ const TodoCalendarApp = () => {
   // Enhanced drag handlers with shift-copy functionality
   const handleEnhancedDragStart = (e, item, source) => {
     if (isMobile) return; // Use touch handlers on mobile
+    // Include occurrenceId when dragging scheduled items so we can target a single instance
     setDraggedItem({ ...item, source });
     e.dataTransfer.effectAllowed = 'copyMove';
   };
@@ -1006,49 +1028,71 @@ const TodoCalendarApp = () => {
     // Check if shift key is pressed at drop time
     const isShiftPressed = e.shiftKey;
 
-    const newScheduledItem = {
-      ...draggedItem,
-      day,
-      startTime,
-      weekOffset,
-      id: isShiftPressed ? Date.now() : (draggedItem.id || `scheduled-${Date.now()}`)
-    };
-
-    if (isShiftPressed) {
-      // Copy mode - create duplicate
-      delete newScheduledItem.source;
-      if (draggedItem.source === 'meeting') {
+    if (draggedItem.source === 'meeting') {
+      // Meetings keep existing behavior
+      if (isShiftPressed) {
         const newMeeting = {
-          ...newScheduledItem,
+          ...draggedItem,
           id: `m${Date.now()}`,
+          day,
+          startTime,
+          weekOffset,
           color: '#374151'
         };
-        setMeetings(prev => [...prev, newMeeting]);
+        const { source, ...clean } = newMeeting;
+        setMeetings(prev => [...prev, clean]);
       } else {
-        setScheduledTasks(prev => [...prev, newScheduledItem]);
-      }
-    } else {
-      // Move mode - existing logic
-      if (draggedItem.source === 'scheduled') {
-        setScheduledTasks(prev => prev.map(t => 
-          t.id === draggedItem.id && t.weekOffset === draggedItem.weekOffset 
-            ? { ...newScheduledItem, weekOffset } 
-            : t
-        ));
-      } else if (draggedItem.source === 'meeting') {
         setMeetings(prev => prev.map(m => 
           m.id === draggedItem.id 
-            ? { ...m, day: newScheduledItem.day, startTime: newScheduledItem.startTime, weekOffset }
+            ? { ...m, day, startTime, weekOffset }
             : m
         ));
-      } else if (draggedItem.source === 'completed') {
-        setCompletedTasks(prev => prev.filter(t => t.id !== draggedItem.id));
-        delete newScheduledItem.source;
-        delete newScheduledItem.completedAt;
-        setScheduledTasks(prev => [...prev, newScheduledItem]);
+      }
+    } else {
+      // Tasks
+      if (isShiftPressed) {
+        // Linked duplicate: keep the SAME task id, just add another scheduled instance with a new occurrenceId
+        const newScheduledItem = {
+          ...draggedItem,
+          day,
+          startTime,
+          weekOffset,
+          occurrenceId: createOccurrenceId(String(draggedItem.id))
+        };
+        const { source, completedAt, ...clean } = newScheduledItem;
+        setScheduledTasks(prev => [...prev, clean]);
       } else {
-        delete newScheduledItem.source;
-        setScheduledTasks(prev => [...prev, newScheduledItem]);
+        if (draggedItem.source === 'scheduled') {
+          // Move only this occurrence
+          setScheduledTasks(prev => prev.map(t => 
+            t.occurrenceId === draggedItem.occurrenceId
+              ? { ...t, day, startTime, weekOffset }
+              : t
+          ));
+        } else if (draggedItem.source === 'completed') {
+          // Move from completed back to schedule: add one instance
+          setCompletedTasks(prev => prev.filter(t => t.id !== draggedItem.id));
+          const newScheduledItem = {
+            ...draggedItem,
+            day,
+            startTime,
+            weekOffset,
+            occurrenceId: createOccurrenceId(String(draggedItem.id))
+          };
+          const { source, completedAt, ...clean } = newScheduledItem;
+          setScheduledTasks(prev => [...prev, clean]);
+        } else {
+          // From unscheduled: add one instance
+          const newScheduledItem = {
+            ...draggedItem,
+            day,
+            startTime,
+            weekOffset,
+            occurrenceId: createOccurrenceId(String(draggedItem.id))
+          };
+          const { source, ...clean } = newScheduledItem;
+          setScheduledTasks(prev => [...prev, clean]);
+        }
       }
     }
 
@@ -1068,7 +1112,26 @@ const TodoCalendarApp = () => {
   };
 
   const handleUncompleteTask = (taskId) => {
+    // Remove from completed
     setCompletedTasks(prev => prev.filter(t => t.id !== taskId));
+
+    // Restore to Tasks if not present
+    const completed = completedTasks.find(t => t.id === taskId);
+    if (completed) {
+      setTasks(prev => {
+        const exists = prev.some(t => t.id === taskId);
+        if (exists) return prev;
+        const { day, startTime, weekOffset: _wo, occurrenceId: _occ, ...base } = completed;
+        return [...prev, base];
+      });
+    }
+
+    // Clear strike-through state for this task id
+    setStruckThroughTasks(prev => {
+      const newSet = new Set(prev);
+      newSet.delete(taskId);
+      return newSet;
+    });
   };
 
   const handleDeleteCompletedTask = (taskId) => {
@@ -1092,11 +1155,13 @@ const TodoCalendarApp = () => {
       const task = scheduledTasks.find(t => t.id === editingItem.id && t.weekOffset === weekOffset) ||
                    tasks.find(t => t.id === editingItem.id);
       if (task) {
-        // Remove from scheduled or unscheduled
-        setScheduledTasks(prev => prev.filter(t => 
-          !(t.id === editingItem.id && t.weekOffset === weekOffset)
-        ));
-        setCompletedTasks(prev => [...prev, { ...editingItem, completedAt: new Date() }]);
+        // Remove all scheduled instances for this id in current week (consistent with "complete both")
+        setScheduledTasks(prev => prev.filter(t => !(t.id === editingItem.id && t.weekOffset === weekOffset)));
+        const lastDate = getLastOccurrenceDateForTask(editingItem.id);
+        setCompletedTasks(prev => {
+          const exists = prev.some(t => t.id === editingItem.id);
+          return exists ? prev : [...prev, { ...editingItem, completedAt: lastDate }];
+        });
       }
       setEditingItem(null);
     }
@@ -1113,10 +1178,15 @@ const TodoCalendarApp = () => {
           setEditingItem(null);
         }
       } else {
-        // Delete task
-        setTasks(prev => prev.filter(t => t.id !== editingItem.id));
-        setScheduledTasks(prev => prev.filter(t => t.id !== editingItem.id));
-        setCompletedTasks(prev => prev.filter(t => t.id !== editingItem.id));
+        if (editingItem.occurrenceId) {
+          // Delete only this scheduled occurrence
+          setScheduledTasks(prev => prev.filter(t => t.occurrenceId !== editingItem.occurrenceId));
+        } else {
+          // Delete task everywhere
+          setTasks(prev => prev.filter(t => t.id !== editingItem.id));
+          setScheduledTasks(prev => prev.filter(t => t.id !== editingItem.id));
+          setCompletedTasks(prev => prev.filter(t => t.id !== editingItem.id));
+        }
         setEditingItem(null);
       }
     }
@@ -1140,17 +1210,26 @@ const TodoCalendarApp = () => {
           const { isNewRightClickTask, ...taskData } = editingItem;
           const taskWithColor = {
             ...taskData,
-            color: getColorForTask(taskData.name)
+            color: getColorForTask(taskData.name),
+            occurrenceId: createOccurrenceId(String(taskData.id))
           };
           setScheduledTasks(prev => [...prev, taskWithColor]);
         } else {
-          // This is an existing task, update it
-          setTasks(prev => prev.map(t => 
-            t.id === editingItem.id ? { ...t, ...editingItem } : t
+          // This is an existing task, update shared fields globally, avoid moving other instances
+          setTasks(prev => prev.map(t =>
+            t.id === editingItem.id
+              ? { ...t, name: editingItem.name, notes: editingItem.notes || '', color: editingItem.color, duration: editingItem.duration }
+              : t
           ));
-          setScheduledTasks(prev => prev.map(t => 
-            t.id === editingItem.id ? { ...t, ...editingItem } : t
-          ));
+          setScheduledTasks(prev => prev.map(t => {
+            if (t.id !== editingItem.id) return t;
+            const updated = { ...t, name: editingItem.name, notes: editingItem.notes || '', color: editingItem.color };
+            // If editing a scheduled occurrence, apply duration only to that occurrence
+            if (editingItem.occurrenceId && t.occurrenceId === editingItem.occurrenceId) {
+              updated.duration = editingItem.duration;
+            }
+            return updated;
+          }));
         }
       }
       setEditingItem(null);
@@ -1286,7 +1365,8 @@ const TodoCalendarApp = () => {
             ...task,
             day: slot.day,
             startTime: slot.time,
-            weekOffset
+            weekOffset,
+            occurrenceId: createOccurrenceId(String(task.id))
           };
           
           newScheduledTasks.push(scheduledTask);
@@ -1395,6 +1475,54 @@ const TodoCalendarApp = () => {
     setColorMap(prev => ({ ...prev, [firstWord]: newColor }));
     return newColor;
   };
+
+  // Helper: Monday date for a given week offset (relative to current week)
+  const getMondayForOffset = useCallback((offset) => {
+    const today = new Date();
+    const monday = new Date(today);
+    monday.setDate(today.getDate() - today.getDay() + 1 + (offset * 7));
+    monday.setHours(0, 0, 0, 0);
+    return monday;
+  }, []);
+
+  // Helper: Determine the last occurrence date for a task id across all scheduled instances
+  const getLastOccurrenceDateForTask = useCallback((taskId) => {
+    const occ = scheduledTasks.filter(t => t.id === taskId);
+    if (occ.length === 0) return new Date();
+    const last = occ.reduce((a, b) => {
+      if ((a.weekOffset || 0) !== (b.weekOffset || 0)) return (a.weekOffset || 0) > (b.weekOffset || 0) ? a : b;
+      if ((a.day || 0) !== (b.day || 0)) return (a.day || 0) > (b.day || 0) ? a : b;
+      return (a.startTime || 0) >= (b.startTime || 0) ? a : b;
+    });
+    const monday = getMondayForOffset(last.weekOffset || 0);
+    const date = new Date(monday);
+    date.setDate(monday.getDate() + (last.day || 0));
+    // Set to noon to avoid timezone boundary issues
+    date.setHours(12, 0, 0, 0);
+    return date;
+  }, [scheduledTasks, getMondayForOffset]);
+
+  // Compute daily completion counts for the displayed week
+  const getDailyCompletionCounts = useCallback(() => {
+    const counts = [0, 0, 0, 0, 0];
+    if (!completedTasks || completedTasks.length === 0) return counts;
+    for (let i = 0; i < 5; i++) {
+      const start = new Date(weekDates[i]);
+      start.setHours(0, 0, 0, 0);
+      const end = new Date(start);
+      end.setDate(start.getDate() + 1);
+      counts[i] = completedTasks.reduce((acc, t) => {
+        const ts = t.completedAt ? new Date(t.completedAt) : null;
+        if (ts && ts >= start && ts < end) {
+          return acc + 1;
+        }
+        return acc;
+      }, 0);
+    }
+    return counts;
+  }, [completedTasks, weekDates]);
+
+  const dailyCompletionCounts = getDailyCompletionCounts();
 
   return (
     <div className={`h-screen bg-gray-50 ${isMobile ? 'p-2' : 'p-4'} flex flex-col`}>
@@ -1513,9 +1641,7 @@ const TodoCalendarApp = () => {
         <div className={`${isMobile ? 'flex flex-col' : 'grid grid-cols-12 gap-6'} flex-1 min-h-0`}>
           {/* Left Sidebar - Unscheduled Tasks */}
           <div className={`${isMobile ? 
-            `fixed inset-y-0 left-0 z-50 w-80 bg-white shadow-lg transform transition-transform duration-300 ease-in-out ${
-              sidebarOpen ? 'translate-x-0' : '-translate-x-full'
-            }` : 
+            `fixed inset-y-0 left-0 z-50 w-80 bg-white shadow-lg transform transition-transform duration-300 ease-in-out ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}` : 
             'col-span-3'
           } flex flex-col gap-4 min-h-0 ${isMobile ? 'pt-4' : ''}`}>
             <div 
@@ -1716,7 +1842,8 @@ const TodoCalendarApp = () => {
                       weekday: 'long', 
                       month: 'long', 
                       day: 'numeric' 
-                    })}
+                    })}{' '}
+                    ({dailyCompletionCounts[selectedDay]}✓)
                   </div>
                 )}
                 
@@ -1742,7 +1869,7 @@ const TodoCalendarApp = () => {
                   <div className="text-sm font-semibold text-gray-600 p-1 text-center sticky top-0 bg-white z-20">Time</div>
                   {viewMode === 'day' ? (
                     <div className="text-sm font-semibold text-gray-700 p-2 text-center sticky top-0 bg-white z-20">
-                      <div>{dayNames[selectedDay]}</div>
+                      <div>{dayNames[selectedDay]} ({dailyCompletionCounts[selectedDay]}✓)</div>
                       <div className="text-xs text-gray-500">
                         {weekDates[selectedDay].toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
                       </div>
@@ -1750,7 +1877,7 @@ const TodoCalendarApp = () => {
                   ) : (
                     dayNames.map((day, index) => (
                       <div key={day} className="text-sm font-semibold text-gray-700 p-2 text-center sticky top-0 bg-white z-20">
-                        <div>{day}</div>
+                        <div>{day} ({dailyCompletionCounts[index]}✓)</div>
                         <div className="text-xs text-gray-500">
                           {weekDates[index].toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
                         </div>
@@ -1772,9 +1899,7 @@ const TodoCalendarApp = () => {
                             data-calendar-cell
                             data-day={dayIndex}
                             data-hour={hour}
-                            className={`border-t border-l border-gray-200 relative hover:bg-gray-50 ${
-                              isTimeSlotPast(dayIndex, hour) ? 'bg-gray-100' : ''
-                            }`}
+                            className={`border-t border-l border-gray-200 relative hover:bg-gray-50 ${isTimeSlotPast(dayIndex, hour) ? 'bg-gray-100' : ''}`}
                             style={{ 
                               height: `${pixelsPerHour}px`,
                               ...(isMobile ? { touchAction: 'pan-y', userSelect: 'none', WebkitUserSelect: 'none' } : {})
@@ -1818,7 +1943,7 @@ const TodoCalendarApp = () => {
                                 
                                 return (
                                   <div
-                                    key={`${item.id}-${item.instanceKey || ''}`}
+                                    key={`${item.occurrenceId || item.id}-${item.instanceKey || ''}`}
                                     draggable
                                     onDragStart={(e) => handleEnhancedDragStart(e, item, isMeeting ? 'meeting' : 'scheduled')}
                                     onTouchStart={(e) => handleTouchStart(e, item, isMeeting ? 'meeting' : 'scheduled')}
@@ -1878,7 +2003,7 @@ const TodoCalendarApp = () => {
                                             <button
                                               onClick={(e) => {
                                                 e.stopPropagation();
-                                                handleUnscheduleTask(item.id);
+                                                handleUnscheduleTask(item.id, item.occurrenceId);
                                               }}
                                               className="p-0.5 hover:bg-white hover:bg-opacity-20 rounded"
                                               title="Move back to Tasks"
@@ -1898,7 +2023,7 @@ const TodoCalendarApp = () => {
                                             <button
                                               onClick={(e) => {
                                                 e.stopPropagation();
-                                                handleDeleteTask(item.id);
+                                                handleDeleteOccurrence(item.id, item.occurrenceId);
                                               }}
                                               className="p-0.5 hover:bg-white hover:bg-opacity-20 rounded"
                                               title="Delete permanently"
