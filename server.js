@@ -61,7 +61,9 @@ function generateCalendarId() {
   return id;
 }
 
-// Default calendar structure
+/**
+ * Default calendar structure
+ */
 function emptyCalendar(initialData = {}) {
   return {
     tasks: initialData.tasks || [],
@@ -72,6 +74,53 @@ function emptyCalendar(initialData = {}) {
   };
 }
 
+/**
+ * Transient error detection and retry helpers (mitigates cold starts/network hiccups)
+ */
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function isTransientError(err) {
+  const code = err?.code || err?.name;
+  const http = err?.$metadata?.httpStatusCode;
+  if (http && (http === 429 || http >= 500)) return true;
+  const transient = new Set([
+    'ECONNRESET',
+    'ETIMEDOUT',
+    'EAI_AGAIN',
+    'ENETUNREACH',
+    'EHOSTUNREACH',
+    'ENETDOWN',
+    'RequestTimeout',
+    'TimeoutError',
+    'NetworkingError',
+    'SlowDown',
+    'TransientError',
+  ]);
+  return transient.has(code);
+}
+
+async function withRetries(fn, { retries = 3, baseDelayMs = 300 } = {}) {
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (attempt === retries || !isTransientError(err)) {
+        throw err;
+      }
+      const delay = baseDelayMs * Math.pow(2, attempt) + Math.floor(Math.random() * baseDelayMs);
+      console.warn(
+        `[retry] transient error (${err?.code || err?.name || err?.message}); attempt ${
+          attempt + 1
+        }/${retries + 1} retrying in ${delay}ms`
+      );
+      await sleep(delay);
+    }
+  }
+  throw lastErr;
+}
+
 // Filesystem helpers
 async function readCalendarFS(id) {
   const filePath = path.join(DATA_DIR, `calendar_${id}.json`);
@@ -80,8 +129,12 @@ async function readCalendarFS(id) {
 }
 
 async function writeCalendarFS(id, data) {
+  // Atomic write: write to temp file then rename to avoid partial writes on crashes
   const filePath = path.join(DATA_DIR, `calendar_${id}.json`);
-  await fs.writeFile(filePath, JSON.stringify(data, null, 2));
+  const tmpPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+  const payload = JSON.stringify(data, null, 2);
+  await fs.writeFile(tmpPath, payload, 'utf8');
+  await fs.rename(tmpPath, filePath);
 }
 
 async function existsCalendarFS(id) {
@@ -107,13 +160,16 @@ async function readCalendarR2(id) {
 
 async function writeCalendarR2(id, data) {
   const Key = r2KeyForId(id);
-  await s3Client.send(
-    new PutObjectCommand({
-      Bucket: R2_BUCKET,
-      Key,
-      Body: JSON.stringify(data, null, 2),
-      ContentType: 'application/json',
-    })
+  const payload = JSON.stringify(data, null, 2);
+  await withRetries(() =>
+    s3Client.send(
+      new PutObjectCommand({
+        Bucket: R2_BUCKET,
+        Key,
+        Body: payload,
+        ContentType: 'application/json',
+      })
+    )
   );
 }
 
@@ -232,7 +288,12 @@ async function calendarExists(id) {
   return USE_R2 ? existsCalendarR2(id) : existsCalendarFS(id);
 }
 
-// API Routes
+ // API Routes
+
+// Lightweight health check (used to detect cold starts)
+app.get('/api/health', (req, res) => {
+  res.json({ ok: true, storage: USE_R2 ? 'r2' : 'fs' });
+});
 
 // Get calendar data
 app.get('/api/calendar/:id', async (req, res) => {
@@ -298,6 +359,14 @@ app.post('/api/calendar/:id', async (req, res) => {
     };
 
     if (hasChanges) {
+      const storage = USE_R2 ? 'r2' : 'fs';
+      try {
+        console.log(
+          `[SAVE] id=${id} storage=${storage} size=${Buffer.byteLength(
+            JSON.stringify(dataToSave)
+          )}B`
+        );
+      } catch {}
       await persistCalendar(id, dataToSave);
     }
 
@@ -308,8 +377,15 @@ app.post('/api/calendar/:id', async (req, res) => {
       message: hasChanges ? 'Calendar updated' : 'No changes detected',
     });
   } catch (error) {
-    console.error('Error saving calendar:', error);
-    res.status(500).json({ error: 'Failed to save calendar' });
+    console.error('Error saving calendar:', {
+      message: error?.message,
+      name: error?.name,
+      code: error?.code,
+      httpStatus: error?.$metadata?.httpStatusCode,
+      metadata: error?.$metadata,
+    });
+    // 503 signals a transient backend problem (e.g., cold start / upstream hiccup)
+    res.status(503).json({ error: 'Failed to save calendar' });
   }
 });
 
