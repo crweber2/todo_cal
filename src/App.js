@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Clock, Plus, X, Check, Edit2, Calendar, ChevronLeft, ChevronRight, GripVertical, Repeat, FileText, ArrowUp, ArrowDown, Eye, Zap, Bell, BellOff, Menu } from 'lucide-react';
+import { Clock, Plus, PlusCircle, X, Check, Edit2, Calendar, ChevronLeft, ChevronRight, GripVertical, Repeat, FileText, ArrowUp, ArrowDown, Eye, Zap, Bell, BellOff, Menu } from 'lucide-react';
 
 // ===== Utilities for dates/times (ISO local dates) =====
 const toYMD = (d) => {
@@ -110,7 +110,7 @@ const TodoCalendarApp = () => {
   const [showTaskModal, setShowTaskModal] = useState(false);
   const [showMeetingModal, setShowMeetingModal] = useState(false);
   const [showDebugModal, setShowDebugModal] = useState(false);
-  const [newTask, setNewTask] = useState({ name: '', duration: 30, notes: '' });
+  const [newTask, setNewTask] = useState({ name: '', duration: 30, notes: '', projectId: null });
   // For meeting modal, keep day/time temporarily; conversion to date happens on add
   const [newMeeting, setNewMeeting] = useState({ name: '', day: 0, startTime: 9, duration: 60, notes: '', recurring: false });
   const [weekOffset, setWeekOffset] = useState(0);
@@ -124,6 +124,13 @@ const TodoCalendarApp = () => {
 
   // Color mapping for consistent task colors based on first word
   const [colorMap, setColorMap] = useState(() => loadFromStorage('todo-colorMap', {}));
+  const [projects, setProjects] = useState(() => loadFromStorage('todo-projects', []));
+  const [standaloneCollapsed, setStandaloneCollapsed] = useState(() => loadFromStorage('todo-standaloneCollapsed', false));
+  const [draggedTaskSection, setDraggedTaskSection] = useState(null);
+  const [projectFilter, setProjectFilter] = useState(() => loadFromStorage('todo-projectFilter', 'all'));
+  const [draggedTaskId, setDraggedTaskId] = useState(null);
+  const [showProjectModal, setShowProjectModal] = useState(false);
+  const [projectDraft, setProjectDraft] = useState({ id: null, name: '', color: '#6B7280', notes: '' });
 
   // Utility to create a unique occurrence ID for a scheduled instance
   const createOccurrenceId = useCallback((base = 'occ') => {
@@ -156,6 +163,7 @@ const TodoCalendarApp = () => {
   const migrateCalendarData = useCallback((data) => {
     const out = {
       tasks: [],
+      projects: [],
       meetings: [],
       scheduledTasks: [],
       completedTasks: [],
@@ -172,9 +180,21 @@ const TodoCalendarApp = () => {
     // Copy tasks -> use durationMinutes field. If legacy tasks used 'duration', map to durationMinutes.
     const mapTask = (t) => {
       const durationMinutes = typeof t.durationMinutes === 'number' ? t.durationMinutes : (typeof t.duration === 'number' ? t.duration : 30);
-      return { id: t.id, name: t.name, durationMinutes, color: t.color, notes: t.notes || '' };
+      return { id: t.id, name: t.name, durationMinutes, color: t.color, notes: t.notes || '', projectId: typeof t.projectId === 'undefined' ? null : t.projectId };
     };
     out.tasks = Array.isArray(data.tasks) ? data.tasks.map(mapTask) : [];
+    // Projects (additive schema)
+    out.projects = Array.isArray(data.projects) ? data.projects.map(p => ({
+      id: p.id ?? `p${Date.now()}`,
+      name: p.name || 'Untitled',
+      color: p.color || '#6B7280',
+      notes: p.notes || '',
+      collapsed: !!p.collapsed,
+      sortOrder: typeof p.sortOrder === 'number' ? p.sortOrder : 0,
+      archived: !!p.archived,
+      createdAt: p.createdAt || null,
+      updatedAt: p.updatedAt || null,
+    })) : [];
 
     // completedTasks: preserve, ensure completedAt ISO
     out.completedTasks = Array.isArray(data.completedTasks) ? data.completedTasks.map(ct => {
@@ -182,7 +202,8 @@ const TodoCalendarApp = () => {
       return {
         ...ct,
         durationMinutes: durationMinutes,
-        completedAt: ct.completedAt ? new Date(ct.completedAt).toISOString() : new Date().toISOString()
+        completedAt: ct.completedAt ? new Date(ct.completedAt).toISOString() : new Date().toISOString(),
+        projectId: typeof ct.projectId === 'undefined' ? null : ct.projectId
       };
     }) : [];
 
@@ -191,8 +212,27 @@ const TodoCalendarApp = () => {
       out.meetings = Array.isArray(data.meetings) ? data.meetings.map(m => ({
         ...m
       })) : [];
+      // Projects from server (if any)
+      out.projects = Array.isArray(data.projects) ? data.projects.map(p => ({
+        id: p.id,
+        name: p.name,
+        color: p.color || '#6B7280',
+        notes: p.notes || '',
+        collapsed: !!p.collapsed,
+        sortOrder: typeof p.sortOrder === 'number' ? p.sortOrder : 0,
+        archived: !!p.archived,
+        createdAt: p.createdAt || null,
+        updatedAt: p.updatedAt || null,
+      })) : [];
+      // Backfill projectId for occurrences/completed from base tasks
+      const taskProjectIndex = new Map(out.tasks.map(t => [t.id, typeof t.projectId === 'undefined' ? null : t.projectId]));
       out.scheduledTasks = Array.isArray(data.scheduledTasks) ? data.scheduledTasks.map(st => ({
-        ...st
+        ...st,
+        projectId: typeof st.projectId === 'undefined' ? (taskProjectIndex.get(st.id) ?? null) : st.projectId
+      })) : [];
+      out.completedTasks = Array.isArray(out.completedTasks) ? out.completedTasks.map(ct => ({
+        ...ct,
+        projectId: typeof ct.projectId === 'undefined' ? (taskProjectIndex.get(ct.id) ?? null) : ct.projectId
       })) : [];
       out.cancelledInstances = Array.isArray(data.cancelledInstances) ? data.cancelledInstances : [];
       out.weekAnchorDate = data.weekAnchorDate || null;
@@ -256,7 +296,8 @@ const TodoCalendarApp = () => {
         notes: st.notes || '',
         date: abs.date,
         startMinutes: abs.startMinutes,
-        durationMinutes: abs.durationMinutes
+        durationMinutes: abs.durationMinutes,
+        projectId: (out.tasks.find(t => t.id === st.id)?.projectId ?? null)
       };
     }) : [];
 
@@ -298,6 +339,7 @@ const TodoCalendarApp = () => {
         setWeekAnchorDate(migrated.weekAnchorDate);
         setTasks(migrated.tasks || []);
         setMeetings(migrated.meetings || []);
+        setProjects(migrated.projects || []);
         // Ensure server-loaded scheduled tasks also get occurrenceId
         const loadedScheduled = (migrated.scheduledTasks || []).map(t => t.occurrenceId ? t : { ...t, occurrenceId: `${t.id || 'occ'}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}` });
         setScheduledTasks(loadedScheduled);
@@ -324,6 +366,7 @@ const TodoCalendarApp = () => {
   const buildPayload = (clientLastModified) => {
     return {
       tasks,
+      projects,
       meetings,
       scheduledTasks,
       completedTasks,
@@ -542,6 +585,36 @@ const TodoCalendarApp = () => {
     }
   }, [colorMap]);
 
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        window.localStorage.setItem('todo-projects', JSON.stringify(projects));
+      } catch (error) {
+        console.error('Error saving projects to localStorage:', error);
+      }
+    }
+  }, [projects]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        window.localStorage.setItem('todo-standaloneCollapsed', JSON.stringify(standaloneCollapsed));
+      } catch (error) {
+        console.error('Error saving standaloneCollapsed to localStorage:', error);
+      }
+    }
+  }, [standaloneCollapsed]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        window.localStorage.setItem('todo-projectFilter', JSON.stringify(projectFilter));
+      } catch (error) {
+        console.error('Error saving projectFilter to localStorage:', error);
+      }
+    }
+  }, [projectFilter]);
+
   // Helper: Monday date for a given week offset (relative to current week)
   const getMondayForOffset = useCallback((offset) => {
     const today = new Date();
@@ -566,6 +639,15 @@ const TodoCalendarApp = () => {
   const dayNames = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
   const hours = Array.from({ length: 14 }, (_, i) => i + 6); // 6 AM to 7 PM for day view
   const weekHours = Array.from({ length: 10 }, (_, i) => i + 8); // 8 AM to 5 PM for week view
+
+  // Filtered scheduled tasks based on project filter (calendar + current/next)
+  const filteredScheduledTasks = useCallback(() => {
+    if (projectFilter === 'all') return scheduledTasks;
+    if (projectFilter === 'standalone') {
+      return scheduledTasks.filter(t => (t.projectId ?? null) === null);
+    }
+    return scheduledTasks.filter(t => t.projectId === projectFilter);
+  }, [scheduledTasks, projectFilter]);
 
   // Convert time to 15-minute slots
   const timeToSlot = (time) => Math.floor(time * 4) / 4;
@@ -680,7 +762,7 @@ const TodoCalendarApp = () => {
     const friday = addDays(monday, 4);
 
     // Collect all scheduled items for current week with derived fields
-    const currentWeekTasks = scheduledTasks.filter(t => {
+    const currentWeekTasks = filteredScheduledTasks().filter(t => {
       if (!t?.date) return false;
       const d = fromYMD(t.date);
       if (!d) return false;
@@ -789,7 +871,7 @@ const TodoCalendarApp = () => {
     const dayDate = weekDates[dayIndex];
     const dateStr = toYMD(dayDate);
 
-    const dayTasks = scheduledTasks
+    const dayTasks = filteredScheduledTasks()
       .filter(t => t.date === dateStr)
       .map(t => ({
         ...t,
@@ -1023,7 +1105,8 @@ const TodoCalendarApp = () => {
           name: rest.name,
           durationMinutes: durationMinutes,
           color: rest.color,
-          notes: rest.notes || ''
+          notes: rest.notes || '',
+          projectId: typeof rest.projectId === 'undefined' ? null : rest.projectId
         }]);
       }
     }
@@ -1279,7 +1362,8 @@ const TodoCalendarApp = () => {
           date: dateStr,
           startMinutes,
           durationMinutes: draggedItem.durationMinutes ?? draggedItem.duration ?? 60,
-          occurrenceId: createOccurrenceId(String(draggedItem.id))
+          occurrenceId: createOccurrenceId(String(draggedItem.id)),
+          projectId: (typeof draggedItem.projectId !== 'undefined' ? draggedItem.projectId : (tasks.find(t => t.id === draggedItem.id)?.projectId ?? null))
         };
         setScheduledTasks(prev => [...prev, newScheduledItem]);
       } else {
@@ -1299,7 +1383,8 @@ const TodoCalendarApp = () => {
             date: dateStr,
             startMinutes,
             durationMinutes: draggedItem.durationMinutes ?? draggedItem.duration ?? 60,
-            occurrenceId: createOccurrenceId(String(draggedItem.id))
+            occurrenceId: createOccurrenceId(String(draggedItem.id)),
+            projectId: (typeof draggedItem.projectId !== 'undefined' ? draggedItem.projectId : (tasks.find(t => t.id === draggedItem.id)?.projectId ?? null))
           };
           setScheduledTasks(prev => [...prev, newScheduledItem]);
         } else {
@@ -1311,7 +1396,8 @@ const TodoCalendarApp = () => {
             date: dateStr,
             startMinutes,
             durationMinutes: draggedItem.durationMinutes ?? draggedItem.duration ?? 60,
-            occurrenceId: createOccurrenceId(String(draggedItem.id))
+            occurrenceId: createOccurrenceId(String(draggedItem.id)),
+            projectId: (typeof draggedItem.projectId !== 'undefined' ? draggedItem.projectId : (tasks.find(t => t.id === draggedItem.id)?.projectId ?? null))
           };
           setScheduledTasks(prev => [...prev, newScheduledItem]);
         }
@@ -1347,7 +1433,8 @@ const TodoCalendarApp = () => {
           name: completed.name,
           durationMinutes: completed.durationMinutes ?? completed.duration ?? 30,
           color: completed.color,
-          notes: completed.notes || ''
+          notes: completed.notes || '',
+          projectId: typeof completed.projectId === 'undefined' ? null : completed.projectId
         }];
       });
     }
@@ -1478,12 +1565,25 @@ const TodoCalendarApp = () => {
           // Update shared fields globally; for scheduled occurrence, duration applies to that occurrence only
           setTasks(prev => prev.map(t =>
             t.id === editingItem.id
-              ? { ...t, name: editingItem.name, notes: editingItem.notes || '', color: editingItem.color, durationMinutes: editingItem.duration }
+              ? {
+                  ...t,
+                  name: editingItem.name,
+                  notes: editingItem.notes || '',
+                  color: editingItem.color,
+                  durationMinutes: editingItem.duration,
+                  projectId: typeof editingItem.projectId === 'undefined' ? null : editingItem.projectId
+                }
               : t
           ));
           setScheduledTasks(prev => prev.map(t => {
             if (t.id !== editingItem.id) return t;
-            const updated = { ...t, name: editingItem.name, notes: editingItem.notes || '', color: editingItem.color };
+            const updated = {
+              ...t,
+              name: editingItem.name,
+              notes: editingItem.notes || '',
+              color: editingItem.color,
+              projectId: typeof editingItem.projectId === 'undefined' ? (t.projectId ?? null) : editingItem.projectId
+            };
             if (editingItem.occurrenceId && t.occurrenceId === editingItem.occurrenceId) {
               updated.durationMinutes = editingItem.duration;
             }
@@ -1502,10 +1602,11 @@ const TodoCalendarApp = () => {
         name: newTask.name,
         durationMinutes: newTask.duration,
         notes: newTask.notes || '',
-        color: getColorForTask(newTask.name)
+        color: getColorForTask(newTask.name),
+        projectId: typeof newTask.projectId === 'undefined' ? null : newTask.projectId
       };
       setTasks(prev => [...prev, task]);
-      setNewTask({ name: '', duration: 30, notes: '' });
+      setNewTask({ name: '', duration: 30, notes: '', projectId: null });
       setShowTaskModal(false);
     }
   };
@@ -1639,7 +1740,8 @@ const TodoCalendarApp = () => {
             date: slot.dateStr,
             startMinutes: floatHoursToMinutes(slot.time),
             durationMinutes: task.durationMinutes ?? task.duration,
-            occurrenceId: createOccurrenceId(String(task.id))
+            occurrenceId: createOccurrenceId(String(task.id)),
+            projectId: typeof task.projectId === 'undefined' ? null : task.projectId
           };
           newScheduled.push(scheduledTask);
           existingItems.push({ date: slot.dateStr, startTime: slot.time, duration: scheduledTask.durationMinutes });
@@ -1691,6 +1793,125 @@ const TodoCalendarApp = () => {
 
     setTasks(newTasks);
     setDraggedTaskIndex(null);
+  };
+
+  // Project helpers and per-section drag handlers
+  const addProject = () => {
+    setProjectDraft({ id: null, name: '', color: '#6B7280', notes: '' });
+    setShowProjectModal(true);
+  };
+
+  const toggleProjectCollapsed = (projectId) => {
+    setProjects(prev => prev.map(p => p.id === projectId ? { ...p, collapsed: !p.collapsed, updatedAt: new Date().toISOString() } : p));
+  };
+
+  const openEditProjectModal = (project) => {
+    setProjectDraft({
+      id: project.id,
+      name: project.name || '',
+      color: project.color || '#6B7280',
+      notes: project.notes || ''
+    });
+    setShowProjectModal(true);
+  };
+
+  const handleSaveProject = () => {
+    const now = new Date().toISOString();
+    const trimmedName = (projectDraft.name || '').trim();
+    if (projectDraft.id) {
+      // Update existing project
+      setProjects(prev => prev.map(p => p.id === projectDraft.id ? {
+        ...p,
+        name: trimmedName || 'Untitled',
+        color: projectDraft.color || '#6B7280',
+        notes: projectDraft.notes || '',
+        updatedAt: now
+      } : p));
+    } else {
+      // Create new project
+      const newProj = {
+        id: `p${Date.now()}`,
+        name: trimmedName || 'Untitled',
+        color: projectDraft.color || '#6B7280',
+        notes: projectDraft.notes || '',
+        collapsed: false,
+        sortOrder: projects.length,
+        archived: false,
+        createdAt: now,
+        updatedAt: now
+      };
+      setProjects(prev => [...prev, newProj]);
+    }
+    setShowProjectModal(false);
+  };
+
+  const handleDeleteProject = (projectId) => {
+    // Move related tasks/occurrences/completed to standalone, then remove project
+    setTasks(prev => prev.map(t => t.projectId === projectId ? { ...t, projectId: null } : t));
+    setScheduledTasks(prev => prev.map(st => st.projectId === projectId ? { ...st, projectId: null } : st));
+    setCompletedTasks(prev => prev.map(ct => ct.projectId === projectId ? { ...ct, projectId: null } : ct));
+    setProjects(prev => prev.filter(p => p.id !== projectId));
+    setShowProjectModal(false);
+  };
+
+  const handleDropOnProjectHeader = (e, targetProjectId) => {
+    e.preventDefault();
+    if (draggedTaskId == null) return;
+    setTasks(prev => prev.map(t => t.id === draggedTaskId ? { ...t, projectId: targetProjectId ?? null } : t));
+    setDraggedTaskIndex(null);
+    setDraggedTaskSection(null);
+    setDraggedTaskId(null);
+  };
+
+  const isTaskUnscheduledAndActive = useCallback((task) => {
+    return !scheduledTasks.some(st => st.id === task.id) && !completedTasks.some(ct => ct.id === task.id);
+  }, [scheduledTasks, completedTasks]);
+
+  const handleTaskDragStartInSection = (e, task, sectionProjectId, index) => {
+    setDraggedTaskIndex(index);
+    setDraggedTaskSection(sectionProjectId);
+    setDraggedTaskId(task.id);
+    handleEnhancedDragStart(e, task, 'unscheduled');
+  };
+
+  const handleTaskDropInSection = (e, dropIndex, sectionProjectId) => {
+    e.preventDefault();
+    if (draggedTaskIndex === null || draggedTaskSection === null) return;
+
+    // Cross-section move: update projectId and exit (append to end of target section)
+    if (draggedTaskSection !== sectionProjectId) {
+      setTasks(prev => prev.map(t => t.id === draggedTaskId ? { ...t, projectId: sectionProjectId ?? null } : t));
+      setDraggedTaskIndex(null);
+      setDraggedTaskSection(null);
+      setDraggedTaskId(null);
+      return;
+    }
+
+    const unscheduledInSection = tasks.filter(task =>
+      (task.projectId ?? null) === (sectionProjectId ?? null) && isTaskUnscheduledAndActive(task)
+    );
+
+    if (draggedTaskIndex === dropIndex) {
+      setDraggedTaskIndex(null);
+      setDraggedTaskSection(null);
+      setDraggedTaskId(null);
+      return;
+    }
+
+    const dragged = unscheduledInSection[draggedTaskIndex];
+    const newTasks = [...tasks];
+
+    const draggedIndexGlobal = newTasks.findIndex(t => t.id === dragged.id);
+    const dropTaskId = unscheduledInSection[Math.min(dropIndex, unscheduledInSection.length - 1)]?.id;
+    const dropIndexGlobal = newTasks.findIndex(t => t.id === dropTaskId);
+
+    const [removed] = newTasks.splice(draggedIndexGlobal, 1);
+    newTasks.splice(dropIndexGlobal, 0, removed);
+
+    setTasks(newTasks);
+    setDraggedTaskIndex(null);
+    setDraggedTaskSection(null);
+    setDraggedTaskId(null);
   };
 
   const currentTimePos = getCurrentTimePosition();
@@ -1919,63 +2140,180 @@ const TodoCalendarApp = () => {
                     <Zap className="w-4 h-4" />
                   </button>
                   <button
+                    onClick={addProject}
+                    className="p-2 bg-purple-500 text-white rounded-lg hover:bg-purple-600"
+                    title="Add Project"
+                  >
+                    <PlusCircle className="w-4 h-4" />
+                  </button>
+                  <button
                     onClick={() => setShowTaskModal(true)}
                     className="p-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600"
+                    title="Add Task"
                   >
                     <Plus className="w-4 h-4" />
                   </button>
                 </div>
               </div>
-              <div className="flex-1 overflow-y-auto space-y-2 min-h-[100px] pr-2"
+              <div className="flex-1 overflow-y-auto space-y-3 min-h-[100px] pr-2"
                    onDragOver={handleTaskDragOver}
                    onDrop={handleDropToUnscheduled}
               >
-                {tasks.filter(task => !scheduledTasks.find(st => st.id === task.id) && !completedTasks.find(ct => ct.id === task.id)).map((task, index) => (
-                  <div
-                    key={task.id}
-                    draggable
-                    onDragStart={(e) => {
-                      setDraggedTaskIndex(index);
-                      handleEnhancedDragStart(e, task, 'unscheduled');
-                    }}
+                {/* Standalone section */}
+                <div className="border-b border-gray-100 pb-2">
+                  <button
+                    className="w-full flex items-center justify-between text-left"
+                    onClick={() => setStandaloneCollapsed(!standaloneCollapsed)}
                     onDragOver={handleTaskDragOver}
-                    onDrop={(e) => handleTaskDrop(e, index)}
-                    onTouchStart={(e) => handleTouchStart(e, task, 'unscheduled')}
-                    onTouchMove={(e) => handleTouchMove(e, task, 'unscheduled')}
-                    onTouchEnd={(e) => handleTouchEnd(e, task, 'unscheduled')}
-                    onDoubleClick={() => handleEditItem(task)}
-                    className={`p-3 rounded-lg hover:shadow-lg transition-shadow cursor-move ${isMobile ? 'select-none touch-none' : ''}`}
-                    style={{
-                      backgroundColor: (task.color || '#3B82F6') + '20',
-                      borderLeft: `4px solid ${task.color || '#3B82F6'}`,
-                      ...(isMobile ? {
-                        userSelect: 'none',
-                        WebkitUserSelect: 'none',
-                        touchAction: 'none',
-                        WebkitTouchCallout: 'none'
-                      } : {})
-                    }}
+                    onDrop={(e) => handleDropOnProjectHeader(e, null)}
                   >
-                    <div className="flex justify-between items-start">
-                      <div className="flex-1">
-                        <div className="font-medium text-gray-800">{task.name}</div>
-                        <div className="text-sm text-gray-600 flex items-center mt-1 gap-2">
-                          <div className="flex items-center">
-                            <Clock className="w-3 h-3 mr-1" />
-                            {task.durationMinutes ?? task.duration} min
-                          </div>
-                          {task.notes && (
-                            <FileText className="w-3 h-3 text-gray-400" />
-                          )}
-                        </div>
-                      </div>
-                      <button
-                        onClick={() => handleEditItem(task)}
-                        className="p-1 hover:bg-gray-200 rounded"
-                      >
-                        <Edit2 className="w-3 h-3" />
-                      </button>
+                    <div className="flex items-center gap-2">
+                      <ChevronRight className="w-4 h-4 transition-transform" style={{ transform: standaloneCollapsed ? 'rotate(0deg)' : 'rotate(90deg)' }} />
+                      <span className="font-semibold text-gray-700">Standalone</span>
+                      <span className="text-xs text-gray-500">
+                        ({tasks.filter(t => (t.projectId ?? null) === null && isTaskUnscheduledAndActive(t)).length})
+                      </span>
                     </div>
+                  </button>
+                  {!standaloneCollapsed && (
+                    <div className="mt-2 space-y-2">
+                      {tasks.filter(t => (t.projectId ?? null) === null && isTaskUnscheduledAndActive(t)).map((task, index) => (
+                        <div
+                          key={task.id}
+                          draggable
+                          onDragStart={(e) => handleTaskDragStartInSection(e, task, null, index)}
+                          onDragOver={handleTaskDragOver}
+                          onDrop={(e) => handleTaskDropInSection(e, index, null)}
+                          onDragEnd={() => { setDraggedTaskIndex(null); setDraggedTaskSection(null); setDraggedTaskId(null); }}
+                          onTouchStart={(e) => handleTouchStart(e, task, 'unscheduled')}
+                          onTouchMove={(e) => handleTouchMove(e, task, 'unscheduled')}
+                          onTouchEnd={(e) => handleTouchEnd(e, task, 'unscheduled')}
+                          onDoubleClick={() => handleEditItem(task)}
+                          className={`p-3 rounded-lg hover:shadow-lg transition-shadow cursor-move ${isMobile ? 'select-none touch-none' : ''}`}
+                          style={{
+                            backgroundColor: (task.color || '#3B82F6') + '20',
+                            borderLeft: `4px solid ${task.color || '#3B82F6'}`,
+                            ...(isMobile ? {
+                              userSelect: 'none',
+                              WebkitUserSelect: 'none',
+                              touchAction: 'none',
+                              WebkitTouchCallout: 'none'
+                            } : {})
+                          }}
+                        >
+                          <div className="flex justify-between items-start">
+                            <div className="flex-1">
+                              <div className="font-medium text-gray-800">{task.name}</div>
+                              <div className="text-sm text-gray-600 flex items-center mt-1 gap-2">
+                                <div className="flex items-center">
+                                  <Clock className="w-3 h-3 mr-1" />
+                                  {task.durationMinutes ?? task.duration} min
+                                </div>
+                                {task.notes && (
+                                  <FileText className="w-3 h-3 text-gray-400" />
+                                )}
+                              </div>
+                            </div>
+                            <button
+                              onClick={() => handleEditItem(task)}
+                              className="p-1 hover:bg-gray-200 rounded"
+                            >
+                              <Edit2 className="w-3 h-3" />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Project sections */}
+                {projects
+                  .filter(p => !p.archived)
+                  .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || a.name.localeCompare(b.name))
+                  .map(project => (
+                  <div key={project.id} className="border-b border-gray-100 pb-2">
+                    <div
+                      className="w-full flex items-center justify-between text-left cursor-pointer"
+                      onClick={() => toggleProjectCollapsed(project.id)}
+                      onDoubleClick={() => openEditProjectModal(project)}
+                      onDragOver={handleTaskDragOver}
+                      onDrop={(e) => handleDropOnProjectHeader(e, project.id)}
+                      role="button"
+                      tabIndex={0}
+                    >
+                      <div className="flex items-center gap-2">
+                        <ChevronRight className="w-4 h-4 transition-transform" style={{ transform: project.collapsed ? 'rotate(0deg)' : 'rotate(90deg)' }} />
+                        <span className="inline-block w-3 h-3 rounded-full" style={{ backgroundColor: project.color || '#6B7280' }} />
+                        <span className="font-semibold text-gray-700">{project.name}</span>
+                        <span className="text-xs text-gray-500">
+                          ({tasks.filter(t => t.projectId === project.id && isTaskUnscheduledAndActive(t)).length})
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setNewTask({ name: '', duration: 30, notes: '', projectId: project.id });
+                            setShowTaskModal(true);
+                          }}
+                          className="p-1 hover:bg-gray-200 rounded"
+                          title="Add Task to Project"
+                        >
+                          <PlusCircle className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                    {!project.collapsed && (
+                      <div className="mt-2 space-y-2">
+                        {tasks.filter(t => t.projectId === project.id && isTaskUnscheduledAndActive(t)).map((task, index) => (
+                          <div
+                            key={task.id}
+                            draggable
+                            onDragStart={(e) => handleTaskDragStartInSection(e, task, project.id, index)}
+                            onDragOver={handleTaskDragOver}
+                            onDrop={(e) => handleTaskDropInSection(e, index, project.id)}
+                            onDragEnd={() => { setDraggedTaskIndex(null); setDraggedTaskSection(null); setDraggedTaskId(null); }}
+                            onTouchStart={(e) => handleTouchStart(e, task, 'unscheduled')}
+                            onTouchMove={(e) => handleTouchMove(e, task, 'unscheduled')}
+                            onTouchEnd={(e) => handleTouchEnd(e, task, 'unscheduled')}
+                            onDoubleClick={() => handleEditItem(task)}
+                            className={`p-3 rounded-lg hover:shadow-lg transition-shadow cursor-move ${isMobile ? 'select-none touch-none' : ''}`}
+                            style={{
+                              backgroundColor: (task.color || '#3B82F6') + '20',
+                              borderLeft: `4px solid ${task.color || '#3B82F6'}`,
+                              ...(isMobile ? {
+                                userSelect: 'none',
+                                WebkitUserSelect: 'none',
+                                touchAction: 'none',
+                                WebkitTouchCallout: 'none'
+                              } : {})
+                            }}
+                          >
+                            <div className="flex justify-between items-start">
+                              <div className="flex-1">
+                                <div className="font-medium text-gray-800">{task.name}</div>
+                                <div className="text-sm text-gray-600 flex items-center mt-1 gap-2">
+                                  <div className="flex items-center">
+                                    <Clock className="w-3 h-3 mr-1" />
+                                    {task.durationMinutes ?? task.duration} min
+                                  </div>
+                                  {task.notes && (
+                                    <FileText className="w-3 h-3 text-gray-400" />
+                                  )}
+                                </div>
+                              </div>
+                              <button
+                                onClick={() => handleEditItem(task)}
+                                className="p-1 hover:bg-gray-200 rounded"
+                              >
+                                <Edit2 className="w-3 h-3" />
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
@@ -2091,6 +2429,23 @@ const TodoCalendarApp = () => {
                     >
                       <ChevronRight className={`${isMobile ? 'w-6 h-6' : 'w-5 h-5'}`} />
                     </button>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <label className="text-xs text-gray-600">Project</label>
+                    <select
+                      value={projectFilter}
+                      onChange={(e) => setProjectFilter(e.target.value)}
+                      className={`${isMobile ? 'px-2 py-1 text-xs' : 'px-2 py-1 text-sm'} bg-white border border-gray-300 rounded`}
+                    >
+                      <option value="all">All</option>
+                      <option value="standalone">Standalone</option>
+                      {projects
+                        .filter(p => !p.archived)
+                        .sort((a,b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || a.name.localeCompare(b.name))
+                        .map(p => (
+                          <option key={p.id} value={p.id}>{p.name}</option>
+                        ))}
+                    </select>
                   </div>
                 </div>
 
@@ -2420,6 +2775,17 @@ const TodoCalendarApp = () => {
                       />
                     ))}
                   </div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Project</label>
+                  <select
+                    value={editingItem.projectId ?? ''}
+                    onChange={(e) => setEditingItem({ ...editingItem, projectId: e.target.value || null })}
+                    className="w-full p-2 border rounded mb-4"
+                  >
+                    <option value="">No Project</option>
+                    {projects.filter(p => !p.archived).sort((a,b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || a.name.localeCompare(b.name)).map(p => (
+                      <option key={p.id} value={p.id}>{p.name}</option>
+                    ))}
+                  </select>
                 </>
               )}
               <div className="flex justify-between">
@@ -2497,9 +2863,20 @@ const TodoCalendarApp = () => {
               <textarea
                 value={newTask.notes}
                 onChange={(e) => setNewTask({ ...newTask, notes: e.target.value })}
-                className="w-full p-2 border rounded mb-4 h-24"
+                className="w-full p-2 border rounded mb-2 h-24"
                 placeholder="Add notes..."
               />
+              <label className="block text-sm font-medium text-gray-700 mb-2">Project</label>
+              <select
+                value={newTask.projectId ?? ''}
+                onChange={(e) => setNewTask({ ...newTask, projectId: e.target.value || null })}
+                className="w-full p-2 border rounded mb-4"
+              >
+                <option value="">No Project</option>
+                {projects.filter(p => !p.archived).sort((a,b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || a.name.localeCompare(b.name)).map(p => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </select>
               <div className="flex justify-end gap-2">
                 <button
                   onClick={() => setShowTaskModal(false)}
@@ -2614,6 +2991,76 @@ const TodoCalendarApp = () => {
                 >
                   Add Meeting
                 </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Project Modal */}
+        {showProjectModal && (
+          <div
+            className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100]"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) {
+                setShowProjectModal(false);
+              }
+            }}
+          >
+            <div className="bg-white rounded-lg p-6 w-96">
+              <h3 className="text-xl font-semibold mb-4">
+                {projectDraft.id ? 'Edit Project' : 'New Project'}
+              </h3>
+              <label className="block text-sm font-medium text-gray-700 mb-2">Name</label>
+              <input
+                type="text"
+                value={projectDraft.name}
+                onChange={(e) => setProjectDraft({ ...projectDraft, name: e.target.value })}
+                className="w-full p-2 border rounded mb-4"
+                placeholder="Project name"
+                autoFocus
+              />
+              <label className="block text-sm font-medium text-gray-700 mb-2">Color</label>
+              <div className="flex gap-2 mb-4">
+                {['#6B7280', '#3B82F6', '#10B981', '#F59E0B', '#8B5CF6', '#EC4899', '#EF4444', '#14B8A6'].map(color => (
+                  <button
+                    key={color}
+                    onClick={() => setProjectDraft({ ...projectDraft, color })}
+                    className={`w-8 h-8 rounded-full border-2 ${projectDraft.color === color ? 'border-gray-800' : 'border-gray-300'}`}
+                    style={{ backgroundColor: color }}
+                    title={`Select ${color}`}
+                  />
+                ))}
+              </div>
+              <div className="flex justify-between">
+                <div className="flex gap-2">
+                  {projectDraft.id && (
+                    <button
+                      onClick={() => {
+                        if (window.confirm('Delete this project? Tasks will be moved to Standalone.')) {
+                          handleDeleteProject(projectDraft.id);
+                        }
+                      }}
+                      className="px-4 py-2 bg-red-100 text-red-700 rounded hover:bg-red-200"
+                      title="Delete project"
+                    >
+                      Delete
+                    </button>
+                  )}
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setShowProjectModal(false)}
+                    className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleSaveProject}
+                    className="px-4 py-2 bg-purple-500 text-white rounded hover:bg-purple-600"
+                  >
+                    Save
+                  </button>
+                </div>
               </div>
             </div>
           </div>
