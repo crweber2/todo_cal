@@ -131,6 +131,8 @@ const TodoCalendarApp = () => {
   const [draggedTaskId, setDraggedTaskId] = useState(null);
   const [showProjectModal, setShowProjectModal] = useState(false);
   const [projectDraft, setProjectDraft] = useState({ id: null, name: '', color: '#6B7280', notes: '' });
+  const [draggedProjectId, setDraggedProjectId] = useState(null);
+  const [draggedProjectIndex, setDraggedProjectIndex] = useState(null);
 
   // Utility to create a unique occurrence ID for a scheduled instance
   const createOccurrenceId = useCallback((base = 'occ') => {
@@ -1563,15 +1565,17 @@ const TodoCalendarApp = () => {
           }]);
         } else {
           // Update shared fields globally; for scheduled occurrence, duration applies to that occurrence only
+          const assignedProjectId = typeof editingItem.projectId === 'undefined' ? null : editingItem.projectId;
+          const newColor = assignedProjectId ? (projects.find(p => p.id === assignedProjectId)?.color || '#6B7280') : editingItem.color;
           setTasks(prev => prev.map(t =>
             t.id === editingItem.id
               ? {
                   ...t,
                   name: editingItem.name,
                   notes: editingItem.notes || '',
-                  color: editingItem.color,
+                  color: newColor,
                   durationMinutes: editingItem.duration,
-                  projectId: typeof editingItem.projectId === 'undefined' ? null : editingItem.projectId
+                  projectId: assignedProjectId
                 }
               : t
           ));
@@ -1581,14 +1585,25 @@ const TodoCalendarApp = () => {
               ...t,
               name: editingItem.name,
               notes: editingItem.notes || '',
-              color: editingItem.color,
-              projectId: typeof editingItem.projectId === 'undefined' ? (t.projectId ?? null) : editingItem.projectId
+              color: newColor,
+              projectId: assignedProjectId ?? (t.projectId ?? null)
             };
             if (editingItem.occurrenceId && t.occurrenceId === editingItem.occurrenceId) {
               updated.durationMinutes = editingItem.duration;
             }
             return updated;
           }));
+          setCompletedTasks(prev => prev.map(ct =>
+            ct.id === editingItem.id
+              ? {
+                  ...ct,
+                  name: editingItem.name,
+                  notes: editingItem.notes || '',
+                  color: newColor,
+                  projectId: assignedProjectId
+                }
+              : ct
+          ));
         }
       }
       setEditingItem(null);
@@ -1597,13 +1612,15 @@ const TodoCalendarApp = () => {
 
   const handleAddTask = () => {
     if (newTask.name && newTask.duration > 0) {
+      const assignedProjectId = typeof newTask.projectId === 'undefined' ? null : newTask.projectId;
+      const projectColor = assignedProjectId ? (projects.find(p => p.id === assignedProjectId)?.color || '#6B7280') : null;
       const task = {
         id: Date.now(),
         name: newTask.name,
         durationMinutes: newTask.duration,
         notes: newTask.notes || '',
-        color: getColorForTask(newTask.name),
-        projectId: typeof newTask.projectId === 'undefined' ? null : newTask.projectId
+        color: assignedProjectId ? projectColor : getColorForTask(newTask.name),
+        projectId: assignedProjectId
       };
       setTasks(prev => [...prev, task]);
       setNewTask({ name: '', duration: 30, notes: '', projectId: null });
@@ -1820,13 +1837,18 @@ const TodoCalendarApp = () => {
     const trimmedName = (projectDraft.name || '').trim();
     if (projectDraft.id) {
       // Update existing project
+      const newColor = projectDraft.color || '#6B7280';
       setProjects(prev => prev.map(p => p.id === projectDraft.id ? {
         ...p,
         name: trimmedName || 'Untitled',
-        color: projectDraft.color || '#6B7280',
+        color: newColor,
         notes: projectDraft.notes || '',
         updatedAt: now
       } : p));
+      // Propagate color to all items associated with this project
+      setTasks(prev => prev.map(t => t.projectId === projectDraft.id ? { ...t, color: newColor } : t));
+      setScheduledTasks(prev => prev.map(st => st.projectId === projectDraft.id ? { ...st, color: newColor } : st));
+      setCompletedTasks(prev => prev.map(ct => ct.projectId === projectDraft.id ? { ...ct, color: newColor } : ct));
     } else {
       // Create new project
       const newProj = {
@@ -1857,10 +1879,72 @@ const TodoCalendarApp = () => {
   const handleDropOnProjectHeader = (e, targetProjectId) => {
     e.preventDefault();
     if (draggedTaskId == null) return;
-    setTasks(prev => prev.map(t => t.id === draggedTaskId ? { ...t, projectId: targetProjectId ?? null } : t));
+    const targetColor = targetProjectId ? (projects.find(p => p.id === targetProjectId)?.color || '#6B7280') : null;
+    setTasks(prev => prev.map(t => t.id === draggedTaskId ? { ...t, projectId: targetProjectId ?? null, color: targetColor ?? t.color } : t));
+    setScheduledTasks(prev => prev.map(st => st.id === draggedTaskId ? { ...st, projectId: targetProjectId ?? null, color: targetColor ?? st.color } : st));
+    setCompletedTasks(prev => prev.map(ct => ct.id === draggedTaskId ? { ...ct, projectId: targetProjectId ?? null, color: targetColor ?? ct.color } : ct));
     setDraggedTaskIndex(null);
     setDraggedTaskSection(null);
     setDraggedTaskId(null);
+  };
+
+  // Project reordering
+  const handleProjectDragStart = (e, project, index) => {
+    setDraggedProjectId(project.id);
+    setDraggedProjectIndex(index);
+    e.dataTransfer.effectAllowed = 'move';
+  };
+
+  const handleProjectHeaderDragOver = (e) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+  };
+
+  const handleProjectDrop = (overIndex) => {
+    if (draggedProjectIndex === null || overIndex === null || typeof overIndex === 'undefined') {
+      setDraggedProjectId(null);
+      setDraggedProjectIndex(null);
+      return;
+    }
+    if (draggedProjectIndex === overIndex) {
+      setDraggedProjectId(null);
+      setDraggedProjectIndex(null);
+      return;
+    }
+    const ordered = projects
+      .filter(p => !p.archived)
+      .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || a.name.localeCompare(b.name));
+
+    const move = (arr, from, to) => {
+      const copy = [...arr];
+      const [item] = copy.splice(from, 1);
+      copy.splice(to, 0, item);
+      return copy;
+    };
+
+    const reordered = move(ordered, draggedProjectIndex, overIndex);
+    const now = new Date().toISOString();
+    const sortMap = new Map(reordered.map((p, idx) => [p.id, idx]));
+
+    setProjects(prev =>
+      prev.map(p => {
+        if (p.archived) return p;
+        const newOrder = sortMap.get(p.id);
+        return typeof newOrder === 'number' ? { ...p, sortOrder: newOrder, updatedAt: now } : p;
+      })
+    );
+
+    setDraggedProjectId(null);
+    setDraggedProjectIndex(null);
+  };
+
+  const handleProjectHeaderDrop = (e, targetProjectId, targetIndex) => {
+    e.preventDefault();
+    if (draggedProjectId) {
+      handleProjectDrop(targetIndex);
+      return;
+    }
+    handleDropOnProjectHeader(e, targetProjectId);
   };
 
   const isTaskUnscheduledAndActive = useCallback((task) => {
@@ -1880,7 +1964,10 @@ const TodoCalendarApp = () => {
 
     // Cross-section move: update projectId and exit (append to end of target section)
     if (draggedTaskSection !== sectionProjectId) {
-      setTasks(prev => prev.map(t => t.id === draggedTaskId ? { ...t, projectId: sectionProjectId ?? null } : t));
+      const targetColor = sectionProjectId ? (projects.find(p => p.id === sectionProjectId)?.color || '#6B7280') : null;
+      setTasks(prev => prev.map(t => t.id === draggedTaskId ? { ...t, projectId: sectionProjectId ?? null, color: targetColor ?? t.color } : t));
+      setScheduledTasks(prev => prev.map(st => st.id === draggedTaskId ? { ...st, projectId: sectionProjectId ?? null, color: targetColor ?? st.color } : st));
+      setCompletedTasks(prev => prev.map(ct => ct.id === draggedTaskId ? { ...ct, projectId: sectionProjectId ?? null, color: targetColor ?? ct.color } : ct));
       setDraggedTaskIndex(null);
       setDraggedTaskSection(null);
       setDraggedTaskId(null);
@@ -2231,14 +2318,17 @@ const TodoCalendarApp = () => {
                 {projects
                   .filter(p => !p.archived)
                   .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || a.name.localeCompare(b.name))
-                  .map(project => (
+                  .map((project, index) => (
                   <div key={project.id} className="border-b border-gray-100 pb-2">
                     <div
                       className="w-full flex items-center justify-between text-left cursor-pointer"
                       onClick={() => toggleProjectCollapsed(project.id)}
                       onDoubleClick={() => openEditProjectModal(project)}
-                      onDragOver={handleTaskDragOver}
-                      onDrop={(e) => handleDropOnProjectHeader(e, project.id)}
+                      onDragOver={handleProjectHeaderDragOver}
+                      onDrop={(e) => handleProjectHeaderDrop(e, project.id, index)}
+                      draggable
+                      onDragStart={(e) => handleProjectDragStart(e, project, index)}
+                      onDragEnd={() => { setDraggedProjectId(null); setDraggedProjectIndex(null); }}
                       role="button"
                       tabIndex={0}
                     >
