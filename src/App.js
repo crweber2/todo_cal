@@ -1,6 +1,33 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Clock, Plus, X, Check, Edit2, Calendar, ChevronLeft, ChevronRight, GripVertical, Repeat, FileText, ArrowUp, ArrowDown, Eye, Zap, Bell, BellOff, Menu } from 'lucide-react';
 
+// ===== Utilities for dates/times (ISO local dates) =====
+const toYMD = (d) => {
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+const fromYMD = (s) => {
+  if (!s || typeof s !== 'string') return null;
+  const parts = s.split('-');
+  if (parts.length !== 3) return null;
+  const [y, m, d] = parts.map(Number);
+  if (Number.isNaN(y) || Number.isNaN(m) || Number.isNaN(d)) return null;
+  const dt = new Date(y, m - 1, d);
+  dt.setHours(0, 0, 0, 0);
+  return dt;
+};
+const addDays = (dateOrStr, n) => {
+  const d = typeof dateOrStr === 'string' ? fromYMD(dateOrStr) : new Date(dateOrStr);
+  const out = new Date(d);
+  out.setDate(d.getDate() + n);
+  out.setHours(0, 0, 0, 0);
+  return out;
+};
+const minutesToFloatHours = (min) => min / 60;
+const floatHoursToMinutes = (hoursFloat) => Math.round(hoursFloat * 60);
+
 // Custom hook for mobile detection
 const useIsMobile = () => {
   const [isMobile, setIsMobile] = useState(false);
@@ -11,8 +38,6 @@ const useIsMobile = () => {
       const hasTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
       const userAgent = navigator.userAgent.toLowerCase();
       const isMobileUA = /android|webos|iphone|ipad|ipod|blackberry|iemobile|opera mini/i.test(userAgent);
-      
-      // Consider mobile if screen width < 768px OR has touch + mobile user agent
       setIsMobile(width < 768 || (hasTouch && isMobileUA && width < 1024));
     };
 
@@ -27,17 +52,21 @@ const useIsMobile = () => {
 const TodoCalendarApp = () => {
   // Mobile detection
   const isMobile = useIsMobile();
-  
+
   // Mobile-specific state
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [touchDragState, setTouchDragState] = useState(null);
   const [swipeState, setSwipeState] = useState(null);
-  
+
   // Calendar sync state
   const [calendarId, setCalendarId] = useState(null);
   const [isOnline, setIsOnline] = useState(true);
   const [lastSaved, setLastSaved] = useState(null);
   const [saveStatus, setSaveStatus] = useState('saved'); // 'saving', 'saved', 'error'
+
+  // Versioning/anchor (for legacy migration)
+  const [dateVersion, setDateVersion] = useState(null); // 2 when migrated
+  const [weekAnchorDate, setWeekAnchorDate] = useState(null); // 'YYYY-MM-DD' Monday of anchor week
 
   // View state - default to day view on mobile
   const [viewMode, setViewMode] = useState(() => isMobile ? 'day' : 'week');
@@ -58,22 +87,20 @@ const TodoCalendarApp = () => {
   };
 
   const [tasks, setTasks] = useState(() => loadFromStorage('todo-tasks', [
-    { id: 1, name: 'Review project proposal', duration: 60, color: '#3B82F6', notes: '' },
-    { id: 2, name: 'Team standup', duration: 30, color: '#10B981', notes: '' },
-    { id: 3, name: 'Email responses', duration: 45, color: '#F59E0B', notes: '' },
-    { id: 4, name: 'Code review', duration: 90, color: '#8B5CF6', notes: '' },
-    { id: 5, name: 'Documentation update', duration: 60, color: '#EC4899', notes: '' },
+    { id: 1, name: 'Review project proposal', durationMinutes: 60, color: '#3B82F6', notes: '' },
+    { id: 2, name: 'Team standup', durationMinutes: 30, color: '#10B981', notes: '' },
+    { id: 3, name: 'Email responses', durationMinutes: 45, color: '#F59E0B', notes: '' },
+    { id: 4, name: 'Code review', durationMinutes: 90, color: '#8B5CF6', notes: '' },
+    { id: 5, name: 'Documentation update', durationMinutes: 60, color: '#EC4899', notes: '' },
   ]));
 
-  const [meetings, setMeetings] = useState(() => loadFromStorage('todo-meetings', [
-    { id: 'm1', name: 'Client Meeting', weekOffset: 0, day: 0, startTime: 10, duration: 60, color: '#374151', notes: 'Discuss Q1 goals', recurring: false },
-    { id: 'm2', name: 'Team Sync', weekOffset: 0, day: 1, startTime: 14.25, duration: 30, color: '#374151', notes: '', recurring: true, seriesId: 'series1' },
-    { id: 'm3', name: 'Design Review', weekOffset: 0, day: 2, startTime: 11, duration: 90, color: '#374151', notes: 'Bring mockups', recurring: false },
-  ]));
-
+  // Meetings can be one-off (has date) or recurring series (recurring: true, seriesId, byDay, startMinutes)
+  const [meetings, setMeetings] = useState(() => loadFromStorage('todo-meetings', []));
+  // scheduledTasks occurrences: { id (task id), occurrenceId, name, color, notes?, date:'YYYY-MM-DD', startMinutes:number, durationMinutes:number }
   const [scheduledTasks, setScheduledTasks] = useState(() => loadFromStorage('todo-scheduledTasks', []));
   const [completedTasks, setCompletedTasks] = useState(() => loadFromStorage('todo-completedTasks', []));
   const [struckThroughTasks, setStruckThroughTasks] = useState(() => new Set(loadFromStorage('todo-struckThroughTasks', [])));
+  // cancelledInstances: Set of 'seriesId:YYYY-MM-DD'
   const [cancelledInstances, setCancelledInstances] = useState(() => new Set(loadFromStorage('todo-cancelledInstances', [])));
 
   const [draggedItem, setDraggedItem] = useState(null);
@@ -84,16 +111,17 @@ const TodoCalendarApp = () => {
   const [showMeetingModal, setShowMeetingModal] = useState(false);
   const [showDebugModal, setShowDebugModal] = useState(false);
   const [newTask, setNewTask] = useState({ name: '', duration: 30, notes: '' });
+  // For meeting modal, keep day/time temporarily; conversion to date happens on add
   const [newMeeting, setNewMeeting] = useState({ name: '', day: 0, startTime: 9, duration: 60, notes: '', recurring: false });
   const [weekOffset, setWeekOffset] = useState(0);
   const [resizingItem, setResizingItem] = useState(null);
   const [quickMeetingPos, setQuickMeetingPos] = useState(null);
   const [deleteConfirm, setDeleteConfirm] = useState(null);
-  
+
   // Chime functionality
   const [chimeEnabled, setChimeEnabled] = useState(() => loadFromStorage('todo-chimeEnabled', true));
   const [lastChimeTime, setLastChimeTime] = useState(null);
-  
+
   // Color mapping for consistent task colors based on first word
   const [colorMap, setColorMap] = useState(() => loadFromStorage('todo-colorMap', {}));
 
@@ -108,10 +136,7 @@ const TodoCalendarApp = () => {
     // Ensure we have a valid calendar ID, default to "001" if none provided or if "undefined"
     const id = urlParams.get('id') || '001';
     const validId = id === 'undefined' ? '001' : id;
-    console.log('Calendar ID from URL:', id);
-    console.log('Valid Calendar ID:', validId);
     setCalendarId(validId);
-    // Update URL to reflect the actual calendar ID being used
     if (!urlParams.get('id') || id === 'undefined') {
       urlParams.set('id', validId);
       window.history.replaceState({}, '', `${window.location.pathname}?${urlParams.toString()}`);
@@ -127,26 +152,167 @@ const TodoCalendarApp = () => {
     }
   }, [scheduledTasks, createOccurrenceId]);
 
+  // ===== Migration from legacy (relative weekOffset/day/startTime) to date-based schema =====
+  const migrateCalendarData = useCallback((data) => {
+    const out = {
+      tasks: [],
+      meetings: [],
+      scheduledTasks: [],
+      completedTasks: [],
+      cancelledInstances: [],
+      dateVersion: 2,
+      weekAnchorDate: null,
+      lastModified: data.lastModified || null,
+      created: data.created || null,
+    };
+
+    // Determine if legacy (no dateVersion and items with (weekOffset/day/startTime) present)
+    const isLegacy = !data.dateVersion;
+
+    // Copy tasks -> use durationMinutes field. If legacy tasks used 'duration', map to durationMinutes.
+    const mapTask = (t) => {
+      const durationMinutes = typeof t.durationMinutes === 'number' ? t.durationMinutes : (typeof t.duration === 'number' ? t.duration : 30);
+      return { id: t.id, name: t.name, durationMinutes, color: t.color, notes: t.notes || '' };
+    };
+    out.tasks = Array.isArray(data.tasks) ? data.tasks.map(mapTask) : [];
+
+    // completedTasks: preserve, ensure completedAt ISO
+    out.completedTasks = Array.isArray(data.completedTasks) ? data.completedTasks.map(ct => {
+      const durationMinutes = typeof ct.durationMinutes === 'number' ? ct.durationMinutes : (typeof ct.duration === 'number' ? ct.duration : undefined);
+      return {
+        ...ct,
+        durationMinutes: durationMinutes,
+        completedAt: ct.completedAt ? new Date(ct.completedAt).toISOString() : new Date().toISOString()
+      };
+    }) : [];
+
+    // If not legacy, trust the shape with 'date' and minutes fields
+    if (!isLegacy) {
+      out.meetings = Array.isArray(data.meetings) ? data.meetings.map(m => ({
+        ...m
+      })) : [];
+      out.scheduledTasks = Array.isArray(data.scheduledTasks) ? data.scheduledTasks.map(st => ({
+        ...st
+      })) : [];
+      out.cancelledInstances = Array.isArray(data.cancelledInstances) ? data.cancelledInstances : [];
+      out.weekAnchorDate = data.weekAnchorDate || null;
+      return out;
+    }
+
+    // Legacy anchor: Monday of lastModified or of "now" if missing
+    const anchorBase = data.lastModified ? new Date(data.lastModified) : new Date();
+    const anchorMonday = new Date(anchorBase);
+    anchorMonday.setDate(anchorBase.getDate() - anchorBase.getDay() + 1);
+    anchorMonday.setHours(0, 0, 0, 0);
+    out.weekAnchorDate = toYMD(anchorMonday);
+
+    // Helper to convert legacy (weekOffset/day/startTime,duration) to absolute date/minutes
+    const legacyToAbs = ({ weekOffset = 0, day = 0, startTime = 9, duration = 60 }) => {
+      const dateObj = addDays(anchorMonday, weekOffset * 7 + day);
+      return {
+        date: toYMD(dateObj),
+        startMinutes: floatHoursToMinutes(startTime),
+        durationMinutes: typeof duration === 'number' ? duration : 60
+      };
+    };
+
+    // Meetings: separate recurring vs one-off
+    out.meetings = Array.isArray(data.meetings) ? data.meetings.map(m => {
+      if (m.recurring) {
+        // Convert to series
+        return {
+          id: m.id || `m${Date.now()}`,
+          name: m.name,
+          recurring: true,
+          seriesId: m.seriesId || `series${Date.now()}`,
+          byDay: m.day ?? 0, // Monday=0
+          startMinutes: floatHoursToMinutes(m.startTime ?? 9),
+          durationMinutes: m.duration ?? 60,
+          color: m.color || '#374151',
+          notes: m.notes || ''
+        };
+      } else {
+        const abs = legacyToAbs(m);
+        return {
+          id: m.id || `m${Date.now()}`,
+          name: m.name,
+          date: abs.date,
+          startMinutes: abs.startMinutes,
+          durationMinutes: abs.durationMinutes,
+          color: m.color || '#374151',
+          notes: m.notes || ''
+        };
+      }
+    }) : [];
+
+    // scheduledTasks: to absolute occurrences
+    out.scheduledTasks = Array.isArray(data.scheduledTasks) ? data.scheduledTasks.map(st => {
+      const abs = legacyToAbs(st);
+      return {
+        id: st.id,
+        occurrenceId: st.occurrenceId || `${st.id || 'occ'}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        name: st.name,
+        color: st.color,
+        notes: st.notes || '',
+        date: abs.date,
+        startMinutes: abs.startMinutes,
+        durationMinutes: abs.durationMinutes
+      };
+    }) : [];
+
+    // cancelledInstances: convert from '<id-or-seriesId>-weekN' to 'seriesId:YYYY-MM-DD'
+    const legacyCancelled = Array.isArray(data.cancelledInstances) ? data.cancelledInstances : [];
+    const seriesIndex = new Map();
+    out.meetings.forEach(m => {
+      if (m.recurring && m.seriesId) {
+        seriesIndex.set(m.seriesId, m);
+      }
+    });
+    out.cancelledInstances = legacyCancelled.map(key => {
+      // Try to extract week number
+      const weekMatch = /-week(-?\d+)/.exec(key);
+      const seriesIdGuess = key.split('-week')[0];
+      const weekN = weekMatch ? parseInt(weekMatch[1], 10) : 0;
+      const series = seriesIndex.get(seriesIdGuess);
+      if (series) {
+        const dateObj = addDays(anchorMonday, weekN * 7 + (series.byDay ?? 0));
+        return `${series.seriesId}:${toYMD(dateObj)}`;
+      }
+      // If cannot resolve, keep original for safety
+      return key;
+    });
+
+    return out;
+  }, []);
+
   // Server sync functions
   const loadCalendarFromServer = async (id) => {
     try {
-      console.log('Loading calendar from server with ID:', id);
       const response = await fetch(`/api/calendar/${id}`);
-      console.log('Calendar load response:', response.status, response.statusText);
       if (response.ok) {
         const data = await response.json();
-        console.log('Calendar data loaded:', data);
-        setTasks(data.tasks || []);
-        setMeetings(data.meetings || []);
+
+        // Run migration if needed
+        const migrated = migrateCalendarData(data);
+        setDateVersion(migrated.dateVersion);
+        setWeekAnchorDate(migrated.weekAnchorDate);
+        setTasks(migrated.tasks || []);
+        setMeetings(migrated.meetings || []);
         // Ensure server-loaded scheduled tasks also get occurrenceId
-        const loadedScheduled = (data.scheduledTasks || []).map(t => t.occurrenceId ? t : { ...t, occurrenceId: `${t.id || 'occ'}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}` });
+        const loadedScheduled = (migrated.scheduledTasks || []).map(t => t.occurrenceId ? t : { ...t, occurrenceId: `${t.id || 'occ'}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}` });
         setScheduledTasks(loadedScheduled);
-        setCompletedTasks(data.completedTasks || []);
-        setCancelledInstances(new Set(data.cancelledInstances || []));
-        setLastSaved(data.lastModified);
+        setCompletedTasks(migrated.completedTasks || []);
+        setCancelledInstances(new Set(migrated.cancelledInstances || []));
+        setLastSaved(migrated.lastModified || data.lastModified);
         setIsOnline(true);
+
+        // If legacy was migrated, trigger a save to persist v2
+        if (!data.dateVersion) {
+          setSaveStatus('saving');
+          await saveCalendarToServerInternal(migrated, null);
+          setSaveStatus('saved');
+        }
       } else {
-        console.error('Failed to load calendar from server:', response.status, response.statusText);
         setIsOnline(false);
       }
     } catch (error) {
@@ -155,33 +321,44 @@ const TodoCalendarApp = () => {
     }
   };
 
+  const buildPayload = (clientLastModified) => {
+    return {
+      tasks,
+      meetings,
+      scheduledTasks,
+      completedTasks,
+      cancelledInstances: Array.from(cancelledInstances),
+      dateVersion: 2,
+      weekAnchorDate: weekAnchorDate || null,
+      clientLastModified: clientLastModified || lastSaved
+    };
+  };
+
+  const saveCalendarToServerInternal = async (explicitData, explicitClientLastModified) => {
+    if (!calendarId) return null;
+    const payload = explicitData || buildPayload(explicitClientLastModified);
+    const response = await fetch(`/api/calendar/${calendarId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    return response;
+  };
+
   const saveCalendarToServer = useCallback(async () => {
     if (!calendarId) return;
-    
+
     try {
       setSaveStatus('saving');
-      const data = {
-        tasks,
-        meetings,
-        scheduledTasks,
-        completedTasks,
-        cancelledInstances: Array.from(cancelledInstances)
-      };
-      
-      const response = await fetch(`/api/calendar/${calendarId}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data)
-      });
-      
-      if (response.ok) {
+      const response = await saveCalendarToServerInternal(null, null);
+
+      if (response && response.ok) {
         const result = await response.json();
         setLastSaved(result.lastModified);
         setSaveStatus('saved');
         setIsOnline(true);
       } else {
         setSaveStatus('error');
-        // Retry after 5 seconds on error
         setTimeout(() => {
           if (calendarId) {
             saveCalendarToServer();
@@ -192,44 +369,33 @@ const TodoCalendarApp = () => {
       console.error('Failed to save calendar to server:', error);
       setSaveStatus('error');
       setIsOnline(false);
-      // Retry after 5 seconds on error
       setTimeout(() => {
         if (calendarId) {
           saveCalendarToServer();
         }
       }, 5000);
     }
-  }, [calendarId, tasks, meetings, scheduledTasks, completedTasks, cancelledInstances]);
+  }, [calendarId, tasks, meetings, scheduledTasks, completedTasks, cancelledInstances, weekAnchorDate, lastSaved]);
 
   // Auto-save to server when data changes - with conflict detection and change comparison
   useEffect(() => {
     if (!calendarId) return;
-    
+
     const timeoutId = setTimeout(async () => {
       try {
         setSaveStatus('saving');
-        const data = {
-          tasks,
-          meetings,
-          scheduledTasks,
-          completedTasks,
-          cancelledInstances: Array.from(cancelledInstances),
-          clientLastModified: lastSaved // Include client's last known timestamp
-        };
-        
+        const payload = buildPayload(lastSaved);
         const response = await fetch(`/api/calendar/${calendarId}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(data)
+          body: JSON.stringify(payload)
         });
-        
+
         if (response.ok) {
           const result = await response.json();
           setLastSaved(result.lastModified);
           setSaveStatus('saved');
           setIsOnline(true);
-          
-          // Log if no changes were detected
           if (!result.hasChanges) {
             console.log('Auto-save skipped: No changes detected');
           }
@@ -238,11 +404,8 @@ const TodoCalendarApp = () => {
           const conflictData = await response.json();
           console.warn('Conflict detected:', conflictData.message);
           setSaveStatus('error');
-          
-          // Handle conflict - for now, reload the server data
-          // In a more sophisticated implementation, you might show a merge UI
+
           if (conflictData.serverData) {
-            console.log('Reloading server data due to conflict...');
             setTasks(conflictData.serverData.tasks || []);
             setMeetings(conflictData.serverData.meetings || []);
             setScheduledTasks((conflictData.serverData.scheduledTasks || []).map(t => t.occurrenceId ? t : { ...t, occurrenceId: `${t.id || 'occ'}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}` }));
@@ -250,22 +413,15 @@ const TodoCalendarApp = () => {
             setCancelledInstances(new Set(conflictData.serverData.cancelledInstances || []));
             setLastSaved(conflictData.serverLastModified);
             setSaveStatus('saved');
-            
-            // Show user notification about the conflict
-            alert('Your calendar was updated by another browser. Your changes have been overridden with the latest version.');
+            alert('Your calendar was updated by another browser. The latest version has been loaded.');
           }
         } else {
           setSaveStatus('error');
-          // Retry after 5 seconds on error
           setTimeout(async () => {
             if (calendarId) {
               try {
-                const retryResponse = await fetch(`/api/calendar/${calendarId}`, {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify(data)
-                });
-                if (retryResponse.ok) {
+                const retryResponse = await saveCalendarToServerInternal(payload, lastSaved);
+                if (retryResponse && retryResponse.ok) {
                   const retryResult = await retryResponse.json();
                   setLastSaved(retryResult.lastModified);
                   setSaveStatus('saved');
@@ -281,24 +437,12 @@ const TodoCalendarApp = () => {
         console.error('Failed to save calendar to server:', error);
         setSaveStatus('error');
         setIsOnline(false);
-        // Retry after 5 seconds on error
         setTimeout(async () => {
           if (calendarId) {
             try {
-              const data = {
-                tasks,
-                meetings,
-                scheduledTasks,
-                completedTasks,
-                cancelledInstances: Array.from(cancelledInstances),
-                clientLastModified: lastSaved
-              };
-              const retryResponse = await fetch(`/api/calendar/${calendarId}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(data)
-              });
-              if (retryResponse.ok) {
+              const retryPayload = buildPayload(lastSaved);
+              const retryResponse = await saveCalendarToServerInternal(retryPayload, lastSaved);
+              if (retryResponse && retryResponse.ok) {
                 const retryResult = await retryResponse.json();
                 setLastSaved(retryResult.lastModified);
                 setSaveStatus('saved');
@@ -310,10 +454,10 @@ const TodoCalendarApp = () => {
           }
         }, 5000);
       }
-    }, 2000); // Save 2 seconds after last change
-    
+    }, 2000);
+
     return () => clearTimeout(timeoutId);
-  }, [tasks, meetings, scheduledTasks, completedTasks, cancelledInstances, calendarId, lastSaved]);
+  }, [tasks, meetings, scheduledTasks, completedTasks, cancelledInstances, calendarId, lastSaved, weekAnchorDate]);
 
   // Save to localStorage whenever data changes (backup)
   useEffect(() => {
@@ -398,118 +542,21 @@ const TodoCalendarApp = () => {
     }
   }, [colorMap]);
 
-  // Get meetings for current week (including recurring)
-  const getVisibleMeetings = useCallback(() => {
-    const visible = [];
-    
-    meetings.forEach(meeting => {
-      const instanceKey = `${meeting.id || meeting.seriesId}-week${weekOffset}`;
-      
-      if (!cancelledInstances.has(instanceKey)) {
-        if (meeting.recurring) {
-          // Show recurring meetings in every week
-          visible.push({ ...meeting, weekOffset, instanceKey });
-        } else if (meeting.weekOffset === weekOffset) {
-          // Show non-recurring meetings only in their specific week
-          visible.push({ ...meeting, instanceKey });
-        }
-      }
-    });
-    
-    return visible;
-  }, [meetings, weekOffset, cancelledInstances]);
-
-  // Create audio context for chime
-  const playChime = useCallback(() => {
-    if (!chimeEnabled) return;
-    
-    try {
-      // Create a simple chime sound using Web Audio API
-      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-      const oscillator = audioContext.createOscillator();
-      const gainNode = audioContext.createGain();
-      
-      oscillator.connect(gainNode);
-      gainNode.connect(audioContext.destination);
-      
-      // Create a pleasant chime sound (C major chord)
-      oscillator.frequency.setValueAtTime(523.25, audioContext.currentTime); // C5
-      oscillator.frequency.setValueAtTime(659.25, audioContext.currentTime + 0.1); // E5
-      oscillator.frequency.setValueAtTime(783.99, audioContext.currentTime + 0.2); // G5
-      
-      gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
-      gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 1);
-      
-      oscillator.start(audioContext.currentTime);
-      oscillator.stop(audioContext.currentTime + 1);
-    } catch (error) {
-      console.error('Error playing chime:', error);
-    }
-  }, [chimeEnabled]);
-
-  // Update current time every minute and check for chime notifications
-  useEffect(() => {
-    const timer = setInterval(() => {
-      const newTime = new Date();
-      setCurrentTime(newTime);
-      
-      if (!chimeEnabled || weekOffset !== 0) return;
-      
-      const currentDay = newTime.getDay() - 1; // 0 = Monday
-      const currentHour = newTime.getHours() + newTime.getMinutes() / 60;
-      const currentMinute = newTime.getMinutes();
-      
-      // Only check on the minute mark to avoid duplicate chimes
-      if (currentMinute === 0 || currentMinute === 5 || currentMinute === 10 || 
-          currentMinute === 15 || currentMinute === 20 || currentMinute === 25 || 
-          currentMinute === 30 || currentMinute === 35 || currentMinute === 40 || 
-          currentMinute === 45 || currentMinute === 50 || currentMinute === 55) {
-        
-        const currentWeekTasks = scheduledTasks.filter(t => t.weekOffset === weekOffset);
-        const currentWeekMeetings = getVisibleMeetings();
-        const allScheduled = [...currentWeekTasks, ...currentWeekMeetings];
-        
-        for (const task of allScheduled) {
-          if (task.day !== currentDay) continue;
-          
-          const taskEndTime = task.startTime + task.duration / 60;
-          const fiveMinutesBeforeEnd = taskEndTime - (5 / 60);
-          
-          // Chime 5 minutes before task completion
-          if (Math.abs(currentHour - fiveMinutesBeforeEnd) < 0.02) { // Within ~1 minute tolerance
-            const chimeKey = `${task.id}-${task.weekOffset || 0}-5min-${Math.floor(fiveMinutesBeforeEnd * 60)}`;
-            if (lastChimeTime !== chimeKey) {
-              playChime();
-              setLastChimeTime(chimeKey);
-              console.log(`Chime: 5 minutes until ${task.name} ends`);
-            }
-          }
-          
-          // Chime at task start
-          if (Math.abs(currentHour - task.startTime) < 0.02) { // Within ~1 minute tolerance
-            const chimeKey = `${task.id}-${task.weekOffset || 0}-start-${Math.floor(task.startTime * 60)}`;
-            if (lastChimeTime !== chimeKey) {
-              playChime();
-              setLastChimeTime(chimeKey);
-              console.log(`Chime: ${task.name} is starting`);
-            }
-          }
-        }
-      }
-    }, 60000);
-    return () => clearInterval(timer);
-  }, [chimeEnabled, weekOffset, scheduledTasks, getVisibleMeetings, lastChimeTime, playChime]);
+  // Helper: Monday date for a given week offset (relative to current week)
+  const getMondayForOffset = useCallback((offset) => {
+    const today = new Date();
+    const monday = new Date(today);
+    monday.setDate(today.getDate() - today.getDay() + 1 + (offset * 7));
+    monday.setHours(0, 0, 0, 0);
+    return monday;
+  }, []);
 
   // Get week dates
   const getWeekDates = () => {
     const dates = [];
-    const today = new Date();
-    const monday = new Date(today);
-    monday.setDate(today.getDate() - today.getDay() + 1 + (weekOffset * 7));
-    
+    const monday = getMondayForOffset(weekOffset);
     for (let i = 0; i < 5; i++) {
-      const date = new Date(monday);
-      date.setDate(monday.getDate() + i);
+      const date = addDays(monday, i);
       dates.push(date);
     }
     return dates;
@@ -530,16 +577,86 @@ const TodoCalendarApp = () => {
     return `${displayHour}:${minutes.toString().padStart(2, '0')} ${period}`;
   };
 
+  // Create audio context for chime
+  const playChime = useCallback(() => {
+    if (!chimeEnabled) return;
+
+    try {
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const oscillator = audioContext.createOscillator();
+      const gainNode = audioContext.createGain();
+
+      oscillator.connect(gainNode);
+      gainNode.connect(audioContext.destination);
+
+      oscillator.frequency.setValueAtTime(523.25, audioContext.currentTime); // C5
+      oscillator.frequency.setValueAtTime(659.25, audioContext.currentTime + 0.1); // E5
+      oscillator.frequency.setValueAtTime(783.99, audioContext.currentTime + 0.2); // G5
+
+      gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 1);
+
+      oscillator.start(audioContext.currentTime);
+      oscillator.stop(audioContext.currentTime + 1);
+    } catch (error) {
+      console.error('Error playing chime:', error);
+    }
+  }, [chimeEnabled]);
+
+  // Get visible meeting occurrences for current week (concrete instances with date)
+  const getVisibleMeetings = useCallback(() => {
+    const monday = getMondayForOffset(weekOffset);
+    const friday = addDays(monday, 4);
+    const mondayStr = toYMD(monday);
+    const weekDatesStr = new Set([0,1,2,3,4].map(i => toYMD(addDays(monday, i))));
+
+    const visible = [];
+
+    meetings.forEach(m => {
+      if (m.recurring && m.seriesId != null && typeof m.byDay === 'number') {
+        const dateObj = addDays(monday, m.byDay);
+        const dateStr = toYMD(dateObj);
+        const cancelKey = `${m.seriesId}:${dateStr}`;
+        if (!cancelledInstances.has(cancelKey)) {
+          visible.push({
+            ...m,
+            id: m.id, // keep meeting id
+            date: dateStr,
+            dateStr,
+            startTime: minutesToFloatHours(m.startMinutes),
+            duration: m.durationMinutes,
+            instanceKey: cancelKey // for reference in UI
+          });
+        }
+      } else if (m.date) {
+        // one-off meeting
+        const d = fromYMD(m.date);
+        if (d >= monday && d <= friday && weekDatesStr.has(m.date)) {
+          visible.push({
+            ...m,
+            date: m.date,
+            dateStr: m.date,
+            startTime: minutesToFloatHours(m.startMinutes),
+            duration: m.durationMinutes,
+            instanceKey: `${m.id}:${m.date}`
+          });
+        }
+      }
+    });
+
+    return visible;
+  }, [meetings, cancelledInstances, weekOffset, getMondayForOffset]);
+
   // Get current time position
   const getCurrentTimePosition = () => {
     const now = currentTime;
     const currentDay = now.getDay() - 1; // 0 = Monday
     const currentHour = now.getHours() + now.getMinutes() / 60;
-    
+
     if (weekOffset === 0 && currentDay >= 0 && currentDay < 5) {
       const minHour = viewMode === 'day' ? 6 : 8;
       const maxHour = viewMode === 'day' ? 20 : 18;
-      
+
       if (currentHour >= minHour && currentHour <= maxHour) {
         return {
           day: currentDay,
@@ -550,62 +667,146 @@ const TodoCalendarApp = () => {
     return null;
   };
 
-  // Get current and next task with countdown
+  // Get current and next task with countdown (date-based)
   const getCurrentAndNextTask = () => {
     const now = currentTime;
-    const currentDay = now.getDay() - 1; // 0 = Monday
-    const currentHour = now.getHours() + now.getMinutes() / 60;
-    
+    const todayStr = toYMD(new Date());
+
     let currentTasks = [];
     let nextTask = null;
     let timeRemaining = null;
-    
-    const currentWeekTasks = scheduledTasks.filter(t => t.weekOffset === weekOffset);
+
+    const monday = getMondayForOffset(weekOffset);
+    const friday = addDays(monday, 4);
+
+    // Collect all scheduled items for current week with derived fields
+    const currentWeekTasks = scheduledTasks.filter(t => {
+      if (!t?.date) return false;
+      const d = fromYMD(t.date);
+      if (!d) return false;
+      return d >= monday && d <= friday;
+    }).map(t => ({
+      ...t,
+      startTime: minutesToFloatHours(t.startMinutes),
+      duration: t.durationMinutes
+    }));
+
     const currentWeekMeetings = getVisibleMeetings();
-    
+
     const allScheduled = [...currentWeekTasks, ...currentWeekMeetings].sort((a, b) => {
-      if (a.day !== b.day) return a.day - b.day;
+      if (a.date !== b.date) return fromYMD(a.date) - fromYMD(b.date);
       return a.startTime - b.startTime;
     });
-    
-    for (const task of allScheduled) {
-      const taskEndTime = task.startTime + task.duration / 60;
-      
-      if (weekOffset === 0 && task.day === currentDay && task.startTime <= currentHour && taskEndTime > currentHour) {
-        currentTasks.push(task);
-        // Calculate time remaining for the first current task
+
+    const currentHour = now.getHours() + now.getMinutes() / 60;
+
+    for (const item of allScheduled) {
+      const itemEnd = item.startTime + (item.duration / 60);
+      if (weekOffset === 0 && item.date === todayStr && item.startTime <= currentHour && itemEnd > currentHour) {
+        currentTasks.push(item);
         if (currentTasks.length === 1) {
-          const remainingHours = taskEndTime - currentHour;
+          const remainingHours = itemEnd - currentHour;
           const remainingMinutes = Math.ceil(remainingHours * 60);
           timeRemaining = remainingMinutes;
         }
-      } else if (weekOffset === 0 && (task.day > currentDay || (task.day === currentDay && task.startTime > currentHour))) {
-        if (!nextTask) nextTask = task;
+      } else if (weekOffset === 0 && item.date === todayStr && item.startTime > currentHour) {
+        if (!nextTask) nextTask = item;
       } else if (weekOffset > 0 && !nextTask) {
-        nextTask = task;
+        nextTask = item;
       }
     }
-    
+
     return { currentTasks, nextTask, timeRemaining };
   };
 
+  // Update current time every minute and check for chime notifications
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const newTime = new Date();
+      setCurrentTime(newTime);
+
+      if (!chimeEnabled || weekOffset !== 0) return;
+
+      const todayStr = toYMD(newTime);
+      const currentHour = newTime.getHours() + newTime.getMinutes() / 60;
+      const currentMinute = newTime.getMinutes();
+
+      if ([0,5,10,15,20,25,30,35,40,45,50,55].includes(currentMinute)) {
+        const monday = getMondayForOffset(weekOffset);
+        const friday = addDays(monday, 4);
+
+        const currentWeekTasks = scheduledTasks.filter(t => {
+          if (!t?.date) return false;
+          const d = fromYMD(t.date);
+          if (!d) return false;
+          return d >= monday && d <= friday && t.date === todayStr;
+        }).map(t => ({
+          ...t,
+          startTime: minutesToFloatHours(t.startMinutes),
+          duration: t.durationMinutes
+        }));
+
+        const currentWeekMeetings = getVisibleMeetings().filter(m => m.date === todayStr);
+
+        const allScheduled = [...currentWeekTasks, ...currentWeekMeetings];
+
+        for (const task of allScheduled) {
+          const taskEndTime = task.startTime + task.duration / 60;
+          const fiveMinutesBeforeEnd = taskEndTime - (5 / 60);
+
+          // Chime 5 minutes before task completion
+          if (Math.abs(currentHour - fiveMinutesBeforeEnd) < 0.02) {
+            const chimeKey = `${task.id}-${task.date}-5min-${Math.floor(fiveMinutesBeforeEnd * 60)}`;
+            if (lastChimeTime !== chimeKey) {
+              playChime();
+              setLastChimeTime(chimeKey);
+              console.log(`Chime: 5 minutes until ${task.name} ends`);
+            }
+          }
+
+          // Chime at task start
+          if (Math.abs(currentHour - task.startTime) < 0.02) {
+            const chimeKey = `${task.id}-${task.date}-start-${Math.floor(task.startTime * 60)}`;
+            if (lastChimeTime !== chimeKey) {
+              playChime();
+              setLastChimeTime(chimeKey);
+              console.log(`Chime: ${task.name} is starting`);
+            }
+          }
+        }
+      }
+    }, 60000);
+    return () => clearInterval(timer);
+  }, [chimeEnabled, weekOffset, scheduledTasks, getVisibleMeetings, lastChimeTime, playChime]);
 
   // Increased pixels per hour for better visibility of short tasks
-  const pixelsPerHour = viewMode === 'day' ? 120 : 80; // Day view: 120px/hour, Week view: 80px/hour
+  const pixelsPerHour = viewMode === 'day' ? 120 : 80;
 
   const { currentTasks, nextTask, timeRemaining } = getCurrentAndNextTask();
 
   // Calculate overlapping items for side-by-side display
-  const getOverlappingItems = (day) => {
-    const currentWeekTasks = scheduledTasks.filter(t => t.weekOffset === weekOffset);
-    const currentWeekMeetings = getVisibleMeetings();
-    
-    const dayItems = [
-      ...currentWeekTasks.filter(t => t.day === day),
-      ...currentWeekMeetings.filter(m => m.day === day)
-    ].sort((a, b) => a.startTime - b.startTime);
+  const getOverlappingItems = (dayIndex) => {
+    const dayDate = weekDates[dayIndex];
+    const dateStr = toYMD(dayDate);
 
-    // Reset all items
+    const dayTasks = scheduledTasks
+      .filter(t => t.date === dateStr)
+      .map(t => ({
+        ...t,
+        startTime: minutesToFloatHours(t.startMinutes),
+        duration: t.durationMinutes
+      }));
+
+    const dayMeetings = getVisibleMeetings()
+      .filter(m => m.date === dateStr);
+
+    const dayItems = [
+      ...dayTasks,
+      ...dayMeetings
+    ].map(i => ({ ...i })) // ensure fresh objects
+     .sort((a, b) => a.startTime - b.startTime);
+
+    // Reset columns
     dayItems.forEach(item => {
       item.column = 0;
       item.totalColumns = 1;
@@ -633,29 +834,23 @@ const TodoCalendarApp = () => {
       groups.push(currentGroup);
     }
 
-    // Smart column assignment for each group
+    // Smart column assignment
     groups.forEach(group => {
       if (group.length <= 1) {
-        // Single item, no overlap
         group[0].column = 0;
         group[0].totalColumns = 1;
         return;
       }
 
-      // Check if items can be stacked vertically instead of side-by-side
       const canStack = (item1, item2) => {
         const item1End = item1.startTime + item1.duration / 60;
         const item2End = item2.startTime + item2.duration / 60;
         return item1End <= item2.startTime || item2End <= item1.startTime;
       };
 
-      // Try to find items that can share columns
       const columns = [];
-      
       group.forEach(item => {
         let assignedColumn = -1;
-        
-        // Try to find an existing column where this item can fit
         for (let colIndex = 0; colIndex < columns.length; colIndex++) {
           const canFitInColumn = columns[colIndex].every(colItem => canStack(item, colItem));
           if (canFitInColumn) {
@@ -663,18 +858,14 @@ const TodoCalendarApp = () => {
             break;
           }
         }
-        
-        // If no existing column works, create a new one
         if (assignedColumn === -1) {
           assignedColumn = columns.length;
           columns.push([]);
         }
-        
         columns[assignedColumn].push(item);
         item.column = assignedColumn;
       });
-      
-      // Set total columns for all items in this group
+
       const totalColumns = columns.length;
       group.forEach(item => {
         item.totalColumns = totalColumns;
@@ -706,10 +897,19 @@ const TodoCalendarApp = () => {
     if (!draggedItem) return;
 
     if (draggedItem.source === 'scheduled') {
-      // Complete the linked task: remove all instances of this id for this week and add a single completed entry
-      const anyInstance = scheduledTasks.find(t => t.id === draggedItem.id && t.weekOffset === draggedItem.weekOffset);
+      // Complete the linked task: remove all instances of this id for current week and add a single completed entry
+      const monday = getMondayForOffset(weekOffset);
+      const friday = addDays(monday, 4);
+      const anyInstance = scheduledTasks.find(t => {
+        if (!t?.date) return false;
+        const d = fromYMD(t.date);
+        return t.id === draggedItem.id && d && d >= monday && d <= friday;
+      });
       if (anyInstance) {
-        setScheduledTasks(prev => prev.filter(t => !(t.id === draggedItem.id && t.weekOffset === draggedItem.weekOffset)));
+        setScheduledTasks(prev => prev.filter(t => {
+          const d = t?.date ? fromYMD(t.date) : null;
+          return !(t.id === draggedItem.id && d && d >= monday && d <= friday);
+        }));
         const lastDate = getLastOccurrenceDateForTask(anyInstance.id);
         setCompletedTasks(prev => {
           const exists = prev.some(t => t.id === anyInstance.id);
@@ -731,7 +931,7 @@ const TodoCalendarApp = () => {
     const y = e.clientY - rect.top;
     const quarterHour = Math.floor(y / (pixelsPerHour / 4)) * 0.25;
     const startTime = timeToSlot(hour + quarterHour);
-    
+
     setQuickMeetingPos({ day, startTime });
     setNewMeeting({ name: '', day, startTime, duration: 60, notes: '', recurring: false });
     setShowMeetingModal(true);
@@ -749,18 +949,26 @@ const TodoCalendarApp = () => {
         const deltaY = e.clientY - resizingItem.startY;
         const durationChange = Math.round(deltaY / (pixelsPerHour / 4)) * 15;
         const newDuration = Math.max(15, resizingItem.originalDuration + durationChange);
-        
+
         if (resizingItem.type === 'task') {
           // Resize only this occurrence
-          setScheduledTasks(prev => prev.map(t => 
+          setScheduledTasks(prev => prev.map(t =>
             t.occurrenceId === resizingItem.item.occurrenceId
-              ? { ...t, duration: newDuration } 
+              ? { ...t, durationMinutes: newDuration }
               : t
           ));
         } else if (resizingItem.type === 'meeting') {
-          setMeetings(prev => prev.map(m => 
-            m.id === resizingItem.item.id ? { ...m, duration: newDuration } : m
-          ));
+          // If recurring series, update series duration; if one-off, update that meeting
+          const it = resizingItem.item;
+          if (it.recurring && it.seriesId) {
+            setMeetings(prev => prev.map(m =>
+              m.seriesId === it.seriesId ? { ...m, durationMinutes: newDuration } : m
+            ));
+          } else {
+            setMeetings(prev => prev.map(m =>
+              m.id === it.id ? { ...m, durationMinutes: newDuration } : m
+            ));
+          }
         }
       }
     };
@@ -780,43 +988,59 @@ const TodoCalendarApp = () => {
   }, [resizingItem, pixelsPerHour]);
 
   const handleCompleteTask = (taskId) => {
-    // Find any instance for this week
-    const task = scheduledTasks.find(t => t.id === taskId && t.weekOffset === weekOffset);
-    if (task) {
-      // Remove all instances with the same id in this week
-      setScheduledTasks(prev => prev.filter(t => !(t.id === taskId && t.weekOffset === weekOffset)));
-      // Add only one completion entry (attribute to the last scheduled occurrence date)
+    const monday = getMondayForOffset(weekOffset);
+    const friday = addDays(monday, 4);
+    const any = scheduledTasks.find(t => {
+      if (!t?.date) return false;
+      const d = fromYMD(t.date);
+      return t.id === taskId && d && d >= monday && d <= friday;
+    });
+    if (any) {
+      setScheduledTasks(prev => prev.filter(t => {
+      const d = t?.date ? fromYMD(t.date) : null;
+      return !(t.id === taskId && d && d >= monday && d <= friday);
+    }));
       const lastDate = getLastOccurrenceDateForTask(taskId);
       setCompletedTasks(prev => {
-        const exists = prev.some(t => t.id === task.id);
-        return exists ? prev : [...prev, { ...task, completedAt: lastDate }];
+        const exists = prev.some(t => t.id === any.id);
+        return exists ? prev : [...prev, { ...any, completedAt: lastDate }];
       });
     }
   };
 
   const handleUnscheduleTask = (taskId, occurrenceId) => {
-    // Remove only this occurrence from scheduled tasks
     const task = scheduledTasks.find(t => t.occurrenceId === occurrenceId);
     if (task) {
       setScheduledTasks(prev => prev.filter(t => t.occurrenceId !== occurrenceId));
-      
-      // Check if this task exists in the main tasks array
+
+      // Check if base task exists
       const existsInTasks = tasks.some(t => t.id === taskId);
       if (!existsInTasks) {
-        const { day, startTime, weekOffset: _, occurrenceId: __, ...taskWithoutScheduleInfo } = task;
-        setTasks(prev => [...prev, taskWithoutScheduleInfo]);
+        const { date, startMinutes, occurrenceId: __, durationMinutes, ...rest } = task;
+        // Put back with canonical task fields
+        setTasks(prev => [...prev, {
+          id: taskId,
+          name: rest.name,
+          durationMinutes: durationMinutes,
+          color: rest.color,
+          notes: rest.notes || ''
+        }]);
       }
     }
   };
 
-  // New handler functions for enhanced task icons
   const handleStrikeThroughTask = (taskId) => {
-    const task = scheduledTasks.find(t => t.id === taskId && t.weekOffset === weekOffset);
+    const monday = getMondayForOffset(weekOffset);
+    const friday = addDays(monday, 4);
+    const task = scheduledTasks.find(t => {
+      if (!t?.date) return false;
+      const d = fromYMD(t.date);
+      return t.id === taskId && d && d >= monday && d <= friday;
+    });
     if (task) {
       const isCurrentlyStruckThrough = struckThroughTasks.has(taskId);
-      
+
       if (isCurrentlyStruckThrough) {
-        // Un-strike-through: remove from struck through tasks and completed tasks
         setStruckThroughTasks(prev => {
           const newSet = new Set(prev);
           newSet.delete(taskId);
@@ -824,7 +1048,6 @@ const TodoCalendarApp = () => {
         });
         setCompletedTasks(prev => prev.filter(t => t.id !== taskId));
       } else {
-        // Strike through: add to struck through tasks and completed tasks
         setStruckThroughTasks(prev => new Set([...prev, taskId]));
         const lastDate = getLastOccurrenceDateForTask(task.id);
         setCompletedTasks(prev => {
@@ -836,7 +1059,6 @@ const TodoCalendarApp = () => {
   };
 
   const handleDeleteTask = (taskId) => {
-    // Permanently remove this task everywhere
     setTasks(prev => prev.filter(t => t.id !== taskId));
     setScheduledTasks(prev => prev.filter(t => t.id !== taskId));
     setCompletedTasks(prev => prev.filter(t => t.id !== taskId));
@@ -848,39 +1070,40 @@ const TodoCalendarApp = () => {
   };
 
   const handleDeleteOccurrence = (taskId, occurrenceId) => {
-    // Remove only this scheduled instance
     setScheduledTasks(prev => prev.filter(t => !(t.id === taskId && t.occurrenceId === occurrenceId)));
   };
 
-  // Right-click context menu handler
+  // Right-click context menu handler (create new unsaved right-click task to edit)
   const handleRightClickCalendar = (e, day, hour) => {
     e.preventDefault();
     const rect = e.currentTarget.getBoundingClientRect();
     const y = e.clientY - rect.top;
     const quarterHour = Math.floor(y / (pixelsPerHour / 4)) * 0.25;
     const startTime = timeToSlot(hour + quarterHour);
-    
-    // Create a new task template but don't add it to scheduled tasks yet
-    const newTask = {
+
+    const monday = getMondayForOffset(weekOffset);
+    const date = addDays(monday, day);
+    const dateStr = toYMD(date);
+
+    const newTaskTemplate = {
       id: Date.now(),
       name: '',
       duration: 30,
       notes: '',
-      color: '#3B82F6', // Default color, will be updated when name is set
-      day,
-      startTime,
-      weekOffset,
-      isNewRightClickTask: true // Flag to indicate this is a new right-click task
+      color: '#3B82F6',
+      date: dateStr,
+      startMinutes: floatHoursToMinutes(startTime),
+      occurrenceId: null,
+      isNewRightClickTask: true
     };
-    
-    // Open edit modal for the new task without adding it to scheduled tasks yet
-    setEditingItem(newTask);
+
+    setEditingItem(newTaskTemplate);
   };
 
   // Touch drag handlers for mobile
   const handleTouchStart = (e, item, source) => {
     if (!isMobile) return;
-    
+
     const touch = e.touches[0];
     setTouchDragState({
       item: { ...item, source },
@@ -891,20 +1114,19 @@ const TodoCalendarApp = () => {
       isDragging: false,
       longPressTimer: setTimeout(() => {
         setTouchDragState(prev => prev ? { ...prev, isDragging: true } : null);
-        // Haptic feedback if available
         if (navigator.vibrate) {
           navigator.vibrate(50);
         }
-      }, 500) // 500ms long press
+      }, 500)
     });
   };
 
   const handleTouchMove = (e, item, source) => {
     if (!isMobile || !touchDragState) return;
-    
+
     e.preventDefault();
     const touch = e.touches[0];
-    
+
     setTouchDragState(prev => ({
       ...prev,
       currentX: touch.clientX,
@@ -914,44 +1136,40 @@ const TodoCalendarApp = () => {
 
   const handleTouchEnd = (e, item, source) => {
     if (!isMobile || !touchDragState) return;
-    
+
     clearTimeout(touchDragState.longPressTimer);
-    
+
     if (touchDragState.isDragging) {
-      // Find drop target based on touch position
       const elementBelow = document.elementFromPoint(touchDragState.currentX, touchDragState.currentY);
-      
+
       if (elementBelow) {
-        // Check if dropped on calendar
         const calendarCell = elementBelow.closest('[data-calendar-cell]');
         if (calendarCell) {
           const day = parseInt(calendarCell.dataset.day);
           const hour = parseInt(calendarCell.dataset.hour);
-          
-          // Simulate drop event
+
           const syntheticEvent = {
             preventDefault: () => {},
             clientY: touchDragState.currentY,
             currentTarget: calendarCell,
-            shiftKey: false // Mobile: no shift-duplicate
+            shiftKey: false
           };
-          
+
           setDraggedItem(touchDragState.item);
           handleEnhancedDrop(syntheticEvent, day, hour);
         }
       }
     } else {
-      // Short tap - edit item
       handleEditItem(item);
     }
-    
+
     setTouchDragState(null);
   };
 
   // Swipe navigation handlers for mobile
   const handleSwipeStart = (e) => {
     if (!isMobile || viewMode !== 'day') return;
-    
+
     const touch = e.touches[0];
     setSwipeState({
       startX: touch.clientX,
@@ -962,17 +1180,15 @@ const TodoCalendarApp = () => {
 
   const handleSwipeMove = (e) => {
     if (!isMobile || !swipeState || viewMode !== 'day') return;
-    
+
     const touch = e.touches[0];
     const deltaX = touch.clientX - swipeState.startX;
     const deltaY = touch.clientY - swipeState.startY;
-    
-    // If vertical movement is greater than horizontal, don't interfere with scrolling
+
     if (Math.abs(deltaY) > Math.abs(deltaX)) {
       return;
     }
-    
-    // Prevent horizontal scrolling during swipe
+
     if (Math.abs(deltaX) > 10) {
       e.preventDefault();
     }
@@ -980,38 +1196,30 @@ const TodoCalendarApp = () => {
 
   const handleSwipeEnd = (e) => {
     if (!isMobile || !swipeState || viewMode !== 'day') return;
-    
+
     const touch = e.changedTouches[0];
     const deltaX = touch.clientX - swipeState.startX;
     const deltaY = touch.clientY - swipeState.startY;
     const deltaTime = Date.now() - swipeState.startTime;
-    
-    // Only process swipe if it's primarily horizontal and fast enough
-    if (Math.abs(deltaX) > Math.abs(deltaY) && 
-        Math.abs(deltaX) > 50 && 
-        deltaTime < 500) {
-      
+
+    if (Math.abs(deltaX) > Math.abs(deltaY) && Math.abs(deltaX) > 50 && deltaTime < 500) {
       if (deltaX > 0) {
-        // Swipe right - go to previous day
         handleDayNavigation('prev');
       } else {
-        // Swipe left - go to next day
         handleDayNavigation('next');
       }
-      
-      // Haptic feedback for successful swipe
+
       if (navigator.vibrate) {
         navigator.vibrate(30);
       }
     }
-    
+
     setSwipeState(null);
   };
 
   // Enhanced drag handlers with shift-copy functionality
   const handleEnhancedDragStart = (e, item, source) => {
-    if (isMobile) return; // Use touch handlers on mobile
-    // Include occurrenceId when dragging scheduled items so we can target a single instance
+    if (isMobile) return;
     setDraggedItem({ ...item, source });
     e.dataTransfer.effectAllowed = 'copyMove';
   };
@@ -1025,73 +1233,87 @@ const TodoCalendarApp = () => {
     const quarterHour = Math.floor(y / (pixelsPerHour / 4)) * 0.25;
     const startTime = timeToSlot(hour + quarterHour);
 
-    // Check if shift key is pressed at drop time
     const isShiftPressed = e.shiftKey;
+    const monday = getMondayForOffset(weekOffset);
+    const dateStr = toYMD(addDays(monday, day));
+    const startMinutes = floatHoursToMinutes(startTime);
 
     if (draggedItem.source === 'meeting') {
-      // Meetings keep existing behavior
+      const wasRecurring = !!draggedItem.recurring;
       if (isShiftPressed) {
+        // Duplicate occurrence:
+        // - If recurring, create a one-off meeting occurrence at drop location
+        // - If one-off, create a new one-off at drop location
         const newMeeting = {
-          ...draggedItem,
           id: `m${Date.now()}`,
-          day,
-          startTime,
-          weekOffset,
-          color: '#374151'
+          name: draggedItem.name,
+          date: dateStr,
+          startMinutes,
+          durationMinutes: draggedItem.durationMinutes ?? draggedItem.duration ?? 60,
+          color: '#374151',
+          notes: draggedItem.notes || ''
         };
-        const { source, ...clean } = newMeeting;
-        setMeetings(prev => [...prev, clean]);
+        setMeetings(prev => [...prev, newMeeting]);
       } else {
-        setMeetings(prev => prev.map(m => 
-          m.id === draggedItem.id 
-            ? { ...m, day, startTime, weekOffset }
-            : m
-        ));
+        // Move:
+        if (wasRecurring && draggedItem.seriesId) {
+          // Move the whole series to this day/time
+          setMeetings(prev => prev.map(m =>
+            m.seriesId === draggedItem.seriesId ? { ...m, byDay: day, startMinutes } : m
+          ));
+        } else {
+          // Move one-off meeting
+          setMeetings(prev => prev.map(m =>
+            m.id === draggedItem.id ? { ...m, date: dateStr, startMinutes } : m
+          ));
+        }
       }
     } else {
       // Tasks
       if (isShiftPressed) {
-        // Linked duplicate: keep the SAME task id, just add another scheduled instance with a new occurrenceId
         const newScheduledItem = {
-          ...draggedItem,
-          day,
-          startTime,
-          weekOffset,
+          id: draggedItem.id,
+          name: draggedItem.name,
+          color: draggedItem.color,
+          notes: draggedItem.notes || '',
+          date: dateStr,
+          startMinutes,
+          durationMinutes: draggedItem.durationMinutes ?? draggedItem.duration ?? 60,
           occurrenceId: createOccurrenceId(String(draggedItem.id))
         };
-        const { source, completedAt, ...clean } = newScheduledItem;
-        setScheduledTasks(prev => [...prev, clean]);
+        setScheduledTasks(prev => [...prev, newScheduledItem]);
       } else {
         if (draggedItem.source === 'scheduled') {
-          // Move only this occurrence
-          setScheduledTasks(prev => prev.map(t => 
+          setScheduledTasks(prev => prev.map(t =>
             t.occurrenceId === draggedItem.occurrenceId
-              ? { ...t, day, startTime, weekOffset }
+              ? { ...t, date: dateStr, startMinutes }
               : t
           ));
         } else if (draggedItem.source === 'completed') {
-          // Move from completed back to schedule: add one instance
           setCompletedTasks(prev => prev.filter(t => t.id !== draggedItem.id));
           const newScheduledItem = {
-            ...draggedItem,
-            day,
-            startTime,
-            weekOffset,
+            id: draggedItem.id,
+            name: draggedItem.name,
+            color: draggedItem.color,
+            notes: draggedItem.notes || '',
+            date: dateStr,
+            startMinutes,
+            durationMinutes: draggedItem.durationMinutes ?? draggedItem.duration ?? 60,
             occurrenceId: createOccurrenceId(String(draggedItem.id))
           };
-          const { source, completedAt, ...clean } = newScheduledItem;
-          setScheduledTasks(prev => [...prev, clean]);
+          setScheduledTasks(prev => [...prev, newScheduledItem]);
         } else {
-          // From unscheduled: add one instance
           const newScheduledItem = {
-            ...draggedItem,
-            day,
-            startTime,
-            weekOffset,
+            id: draggedItem.id,
+            name: draggedItem.name,
+            color: draggedItem.color,
+            notes: draggedItem.notes || '',
+            date: dateStr,
+            startMinutes,
+            durationMinutes: draggedItem.durationMinutes ?? draggedItem.duration ?? 60,
             occurrenceId: createOccurrenceId(String(draggedItem.id))
           };
-          const { source, ...clean } = newScheduledItem;
-          setScheduledTasks(prev => [...prev, clean]);
+          setScheduledTasks(prev => [...prev, newScheduledItem]);
         }
       }
     }
@@ -1101,32 +1323,35 @@ const TodoCalendarApp = () => {
 
   // Function to check if time slot is in the past
   const isTimeSlotPast = (dayIndex, hour) => {
-    if (weekOffset !== 0) return false; // Only grey out current week
-    
+    if (weekOffset !== 0) return false;
+    const slotDate = addDays(getMondayForOffset(0), dayIndex);
     const now = currentTime;
-    const currentDay = now.getDay() - 1; // 0 = Monday
+    const nowDateStr = toYMD(now);
+    const slotDateStr = toYMD(slotDate);
+    if (slotDateStr < nowDateStr) return true;
+    if (slotDateStr > nowDateStr) return false;
     const currentHour = now.getHours() + now.getMinutes() / 60;
-    
-    // Consistently grey out all past time slots
-    return dayIndex < currentDay || (dayIndex === currentDay && hour < currentHour);
+    return hour < currentHour;
   };
 
   const handleUncompleteTask = (taskId) => {
-    // Remove from completed
     setCompletedTasks(prev => prev.filter(t => t.id !== taskId));
 
-    // Restore to Tasks if not present
     const completed = completedTasks.find(t => t.id === taskId);
     if (completed) {
       setTasks(prev => {
         const exists = prev.some(t => t.id === taskId);
         if (exists) return prev;
-        const { day, startTime, weekOffset: _wo, occurrenceId: _occ, ...base } = completed;
-        return [...prev, base];
+        return [...prev, {
+          id: completed.id,
+          name: completed.name,
+          durationMinutes: completed.durationMinutes ?? completed.duration ?? 30,
+          color: completed.color,
+          notes: completed.notes || ''
+        }];
       });
     }
 
-    // Clear strike-through state for this task id
     setStruckThroughTasks(prev => {
       const newSet = new Set(prev);
       newSet.delete(taskId);
@@ -1135,14 +1360,12 @@ const TodoCalendarApp = () => {
   };
 
   const handleDeleteCompletedTask = (taskId) => {
-    // Permanently remove this task everywhere
     setCompletedTasks(prev => prev.filter(t => t.id !== taskId));
     setScheduledTasks(prev => prev.filter(t => t.id !== taskId));
     setTasks(prev => prev.filter(t => t.id !== taskId));
   };
 
   const handleClearAllCompleted = () => {
-    // Permanently remove all completed tasks everywhere
     const completedIds = new Set(completedTasks.map(t => t.id));
     setTasks(prev => prev.filter(t => !completedIds.has(t.id)));
     setScheduledTasks(prev => prev.filter(t => !completedIds.has(t.id)));
@@ -1150,17 +1373,17 @@ const TodoCalendarApp = () => {
   };
 
   const handleCompleteFromEdit = () => {
-    if (editingItem && !editingItem.id.toString().startsWith('m')) {
-      // Complete task from edit modal
-      const task = scheduledTasks.find(t => t.id === editingItem.id && t.weekOffset === weekOffset) ||
+    if (editingItem && !(editingItem.id || '').toString().startsWith('m')) {
+      const monday = getMondayForOffset(weekOffset);
+      const friday = addDays(monday, 4);
+      const task = scheduledTasks.find(t => t.id === editingItem.id && fromYMD(t.date) >= monday && fromYMD(t.date) <= friday) ||
                    tasks.find(t => t.id === editingItem.id);
       if (task) {
-        // Remove all scheduled instances for this id in current week (consistent with "complete both")
-        setScheduledTasks(prev => prev.filter(t => !(t.id === editingItem.id && t.weekOffset === weekOffset)));
+        setScheduledTasks(prev => prev.filter(t => !(t.id === editingItem.id && fromYMD(t.date) >= monday && fromYMD(t.date) <= friday)));
         const lastDate = getLastOccurrenceDateForTask(editingItem.id);
         setCompletedTasks(prev => {
           const exists = prev.some(t => t.id === editingItem.id);
-          return exists ? prev : [...prev, { ...editingItem, completedAt: lastDate }];
+          return exists ? prev : [...prev, { ...task, completedAt: lastDate }];
         });
       }
       setEditingItem(null);
@@ -1169,9 +1392,9 @@ const TodoCalendarApp = () => {
 
   const handleDeleteFromEdit = () => {
     if (editingItem) {
-      if (editingItem.id.toString().startsWith('m')) {
-        // Delete meeting
-        if (editingItem.recurring) {
+      if ((editingItem.id || '').toString().startsWith('m')) {
+        // Meeting
+        if (editingItem.recurring && editingItem.seriesId) {
           setDeleteConfirm(editingItem);
         } else {
           setMeetings(prev => prev.filter(m => m.id !== editingItem.id));
@@ -1179,10 +1402,8 @@ const TodoCalendarApp = () => {
         }
       } else {
         if (editingItem.occurrenceId) {
-          // Delete only this scheduled occurrence
           setScheduledTasks(prev => prev.filter(t => t.occurrenceId !== editingItem.occurrenceId));
         } else {
-          // Delete task everywhere
           setTasks(prev => prev.filter(t => t.id !== editingItem.id));
           setScheduledTasks(prev => prev.filter(t => t.id !== editingItem.id));
           setCompletedTasks(prev => prev.filter(t => t.id !== editingItem.id));
@@ -1193,40 +1414,78 @@ const TodoCalendarApp = () => {
   };
 
   const handleEditItem = (item) => {
-    setEditingItem(item);
+    // For tasks, ensure duration minutes is presented as duration
+    if (!(item.id || '').toString().startsWith('m')) {
+      if (typeof item.duration === 'undefined' && typeof item.durationMinutes === 'number') {
+        setEditingItem({ ...item, duration: item.durationMinutes });
+      } else {
+        setEditingItem(item);
+      }
+      return;
+    }
+    // For meetings, ensure duration and startTime are present for editor
+    if (item.recurring) {
+      setEditingItem({
+        ...item,
+        duration: item.durationMinutes
+      });
+    } else {
+      setEditingItem({
+        ...item,
+        duration: item.durationMinutes
+      });
+    }
   };
 
   const handleSaveEdit = () => {
     if (editingItem) {
-      if (editingItem.id.toString().startsWith('m')) {
-        // Editing a meeting
-        setMeetings(prev => prev.map(m => 
-          m.id === editingItem.id ? { ...m, ...editingItem } : m
-        ));
+      if ((editingItem.id || '').toString().startsWith('m')) {
+        // Meeting
+        if (editingItem.recurring && editingItem.seriesId) {
+          setMeetings(prev => prev.map(m =>
+            m.seriesId === editingItem.seriesId
+              ? { ...m, name: editingItem.name, notes: editingItem.notes || '', color: m.color || '#374151', durationMinutes: editingItem.duration }
+              : m
+          ));
+        } else {
+          setMeetings(prev => prev.map(m =>
+            m.id === editingItem.id
+              ? { ...m, name: editingItem.name, notes: editingItem.notes || '', color: m.color || '#374151', durationMinutes: editingItem.duration }
+              : m
+          ));
+        }
       } else {
         // Editing a task
         if (editingItem.isNewRightClickTask) {
-          // This is a new right-click task, add it to scheduled tasks with proper color mapping
           const { isNewRightClickTask, ...taskData } = editingItem;
           const taskWithColor = {
             ...taskData,
             color: getColorForTask(taskData.name),
-            occurrenceId: createOccurrenceId(String(taskData.id))
+            occurrenceId: createOccurrenceId(String(taskData.id)),
+            durationMinutes: editingItem.duration
           };
-          setScheduledTasks(prev => [...prev, taskWithColor]);
+          setScheduledTasks(prev => [...prev, {
+            id: taskWithColor.id,
+            name: taskWithColor.name,
+            color: taskWithColor.color,
+            notes: taskWithColor.notes || '',
+            date: taskWithColor.date,
+            startMinutes: taskWithColor.startMinutes,
+            durationMinutes: taskWithColor.durationMinutes,
+            occurrenceId: taskWithColor.occurrenceId
+          }]);
         } else {
-          // This is an existing task, update shared fields globally, avoid moving other instances
+          // Update shared fields globally; for scheduled occurrence, duration applies to that occurrence only
           setTasks(prev => prev.map(t =>
             t.id === editingItem.id
-              ? { ...t, name: editingItem.name, notes: editingItem.notes || '', color: editingItem.color, duration: editingItem.duration }
+              ? { ...t, name: editingItem.name, notes: editingItem.notes || '', color: editingItem.color, durationMinutes: editingItem.duration }
               : t
           ));
           setScheduledTasks(prev => prev.map(t => {
             if (t.id !== editingItem.id) return t;
             const updated = { ...t, name: editingItem.name, notes: editingItem.notes || '', color: editingItem.color };
-            // If editing a scheduled occurrence, apply duration only to that occurrence
             if (editingItem.occurrenceId && t.occurrenceId === editingItem.occurrenceId) {
-              updated.duration = editingItem.duration;
+              updated.durationMinutes = editingItem.duration;
             }
             return updated;
           }));
@@ -1241,7 +1500,7 @@ const TodoCalendarApp = () => {
       const task = {
         id: Date.now(),
         name: newTask.name,
-        duration: newTask.duration,
+        durationMinutes: newTask.duration,
         notes: newTask.notes || '',
         color: getColorForTask(newTask.name)
       };
@@ -1253,18 +1512,40 @@ const TodoCalendarApp = () => {
 
   const handleAddMeeting = () => {
     if (newMeeting.name && newMeeting.duration > 0) {
-      const meeting = {
-        id: `m${Date.now()}`,
-        ...newMeeting,
-        weekOffset,
-        color: '#374151'
-      };
-      
+      // Determine date/start for quickMeetingPos or selected inputs
+      const startTimeFloat = newMeeting.startTime;
+      const startMinutes = floatHoursToMinutes(startTimeFloat);
+      const color = '#374151';
+
       if (newMeeting.recurring) {
-        meeting.seriesId = `series${Date.now()}`;
+        const meetingSeries = {
+          id: `m${Date.now()}`,
+          name: newMeeting.name,
+          recurring: true,
+          seriesId: `series${Date.now()}`,
+          byDay: newMeeting.day, // 0..4 for Mon..Fri
+          startMinutes,
+          durationMinutes: newMeeting.duration,
+          color,
+          notes: newMeeting.notes || ''
+        };
+        setMeetings(prev => [...prev, meetingSeries]);
+      } else {
+        const monday = getMondayForOffset(weekOffset);
+        const dayIdx = quickMeetingPos ? quickMeetingPos.day : newMeeting.day;
+        const dateStr = toYMD(addDays(monday, dayIdx));
+        const meeting = {
+          id: `m${Date.now()}`,
+          name: newMeeting.name,
+          date: dateStr,
+          startMinutes,
+          durationMinutes: newMeeting.duration,
+          color,
+          notes: newMeeting.notes || ''
+        };
+        setMeetings(prev => [...prev, meeting]);
       }
-      
-      setMeetings(prev => [...prev, meeting]);
+
       setNewMeeting({ name: '', day: 0, startTime: 9, duration: 60, notes: '', recurring: false });
       setShowMeetingModal(false);
       setQuickMeetingPos(null);
@@ -1272,24 +1553,27 @@ const TodoCalendarApp = () => {
   };
 
   const handleDeleteMeeting = (meeting, deleteAll = false) => {
-    if (meeting.recurring && !deleteAll) {
-      // Cancel just this instance
-      setCancelledInstances(prev => new Set([...prev, meeting.instanceKey]));
-    } else if (meeting.recurring && deleteAll) {
-      // Delete the entire series
-      setMeetings(prev => prev.filter(m => 
-        !(m.seriesId && m.seriesId === meeting.seriesId)
-      ));
-      // Clear cancelled instances for this series
-      setCancelledInstances(prev => {
-        const newSet = new Set(prev);
-        Array.from(newSet).forEach(key => {
-          if (key.startsWith(meeting.seriesId)) {
-            newSet.delete(key);
-          }
+    if (meeting.recurring && meeting.seriesId) {
+      if (!deleteAll) {
+        // Cancel just this occurrence for its date
+        const dateStr = meeting.dateStr || meeting.date;
+        if (dateStr) {
+          setCancelledInstances(prev => new Set([...prev, `${meeting.seriesId}:${dateStr}`]));
+        }
+      } else {
+        // Delete entire series
+        setMeetings(prev => prev.filter(m => !(m.seriesId && m.seriesId === meeting.seriesId)));
+        // Clear cancelled instances for this series
+        setCancelledInstances(prev => {
+          const newSet = new Set(prev);
+          Array.from(newSet).forEach(key => {
+            if (key.startsWith(meeting.seriesId + ':')) {
+              newSet.delete(key);
+            }
+          });
+          return newSet;
         });
-        return newSet;
-      });
+      }
     } else {
       // Delete non-recurring meeting
       setMeetings(prev => prev.filter(m => m.id !== meeting.id));
@@ -1304,86 +1588,72 @@ const TodoCalendarApp = () => {
     }
   };
 
-  // Fill tasks starting from current time
+  // Fill tasks starting from current time for current week
   const handleFillTasks = () => {
-    const unscheduledTasks = tasks.filter(task => 
-      !scheduledTasks.find(st => st.id === task.id) && 
+    const unscheduledTasks = tasks.filter(task =>
+      !scheduledTasks.find(st => st.id === task.id) &&
       !completedTasks.find(ct => ct.id === task.id)
     );
 
     if (unscheduledTasks.length === 0) return;
 
-    // Get current time and day
     const now = currentTime;
-    const currentDay = now.getDay() - 1; // 0 = Monday
     const currentHour = now.getHours() + now.getMinutes() / 60;
-    
-    // Only fill for current week
-    if (weekOffset !== 0) return;
+    const monday = getMondayForOffset(weekOffset);
 
-    // Get all existing scheduled items for the current week
     const existingItems = [
-      ...scheduledTasks.filter(t => t.weekOffset === weekOffset),
-      ...getVisibleMeetings()
+      ...scheduledTasks.map(t => ({ date: t.date, startTime: minutesToFloatHours(t.startMinutes), duration: t.durationMinutes })),
+      ...getVisibleMeetings().map(m => ({ date: m.date, startTime: m.startTime, duration: m.duration }))
     ];
 
-    // Create time slots (15-minute intervals from 9 AM to 5 PM)
     const timeSlots = [];
-    for (let day = Math.max(0, currentDay); day < 5; day++) {
-      const startHour = day === currentDay ? Math.max(9, currentHour) : 9;
+    for (let day = Math.max(0, (new Date().getDay() - 1)); day < 5; day++) {
+      const slotDateStr = toYMD(addDays(monday, day));
+      const startHour = (weekOffset === 0 && day === (new Date().getDay() - 1)) ? Math.max(9, currentHour) : 9;
       for (let hour = startHour; hour < 17; hour += 0.25) {
-        timeSlots.push({ day, time: hour });
+        timeSlots.push({ dateStr: slotDateStr, time: hour });
       }
     }
 
-    // Function to check if a time slot is available
-    const isSlotAvailable = (day, startTime, duration) => {
+    const isSlotAvailable = (dateStr, startTime, duration) => {
       const endTime = startTime + duration / 60;
-      
       return !existingItems.some(item => {
-        if (item.day !== day) return false;
+        if (item.date !== dateStr) return false;
         const itemEnd = item.startTime + item.duration / 60;
         return (startTime < itemEnd && endTime > item.startTime);
       });
     };
 
-    // Schedule tasks one by one
-    const newScheduledTasks = [];
-    
+    const newScheduled = [];
+
     for (const task of unscheduledTasks) {
       let scheduled = false;
-      
-      // Find the first available slot that fits this task
       for (const slot of timeSlots) {
-        const durationInHours = task.duration / 60;
-        
-        // Check if task fits in this slot and doesn't conflict
-        if (slot.time + durationInHours <= 17 && 
-            isSlotAvailable(slot.day, slot.time, task.duration)) {
-          
+        const durationInHours = (task.durationMinutes ?? task.duration) / 60;
+        if (slot.time + durationInHours <= 17 && isSlotAvailable(slot.dateStr, slot.time, task.durationMinutes ?? task.duration)) {
           const scheduledTask = {
-            ...task,
-            day: slot.day,
-            startTime: slot.time,
-            weekOffset,
+            id: task.id,
+            name: task.name,
+            color: task.color,
+            notes: task.notes || '',
+            date: slot.dateStr,
+            startMinutes: floatHoursToMinutes(slot.time),
+            durationMinutes: task.durationMinutes ?? task.duration,
             occurrenceId: createOccurrenceId(String(task.id))
           };
-          
-          newScheduledTasks.push(scheduledTask);
-          existingItems.push(scheduledTask); // Add to existing items to avoid conflicts
+          newScheduled.push(scheduledTask);
+          existingItems.push({ date: slot.dateStr, startTime: slot.time, duration: scheduledTask.durationMinutes });
           scheduled = true;
           break;
         }
       }
-      
       if (!scheduled) {
         console.log(`Could not schedule task: ${task.name}`);
       }
     }
 
-    // Update scheduled tasks
-    if (newScheduledTasks.length > 0) {
-      setScheduledTasks(prev => [...prev, ...newScheduledTasks]);
+    if (newScheduled.length > 0) {
+      setScheduledTasks(prev => [...prev, ...newScheduled]);
     }
   };
 
@@ -1397,8 +1667,8 @@ const TodoCalendarApp = () => {
     e.preventDefault();
     if (draggedTaskIndex === null) return;
 
-    const unscheduledTasks = tasks.filter(task => 
-      !scheduledTasks.find(st => st.id === task.id) && 
+    const unscheduledTasks = tasks.filter(task =>
+      !scheduledTasks.find(st => st.id === task.id) &&
       !completedTasks.find(ct => ct.id === task.id)
     );
 
@@ -1409,18 +1679,16 @@ const TodoCalendarApp = () => {
 
     const draggedTask = unscheduledTasks[draggedTaskIndex];
     const newTasks = [...tasks];
-    
-    // Find the actual indices in the full tasks array
+
     const draggedTaskId = draggedTask.id;
     const dropTaskId = unscheduledTasks[dropIndex].id;
-    
+
     const draggedIndex = newTasks.findIndex(t => t.id === draggedTaskId);
     const dropIndexInFull = newTasks.findIndex(t => t.id === dropTaskId);
-    
-    // Remove dragged task and insert at new position
+
     const [removed] = newTasks.splice(draggedIndex, 1);
     newTasks.splice(dropIndexInFull, 0, removed);
-    
+
     setTasks(newTasks);
     setDraggedTaskIndex(null);
   };
@@ -1455,7 +1723,7 @@ const TodoCalendarApp = () => {
 
   const currentDate = getCurrentDate();
 
-  // Utility function to get first word from task name for color mapping
+  // Utility: first word for color mapping
   const getFirstWord = (taskName) => {
     return taskName.trim().toLowerCase().split(' ')[0] || 'default';
   };
@@ -1464,43 +1732,35 @@ const TodoCalendarApp = () => {
   const getColorForTask = (taskName) => {
     const firstWord = getFirstWord(taskName);
     const colors = ['#3B82F6', '#10B981', '#F59E0B', '#8B5CF6', '#EC4899', '#EF4444', '#6B7280', '#14B8A6', '#F97316', '#84CC16'];
-    
-    // Check if we already have a color for this first word
+
     if (colorMap[firstWord]) {
       return colorMap[firstWord];
     }
-    
-    // Assign a new color and update the color map
+
     const newColor = colors[Object.keys(colorMap).length % colors.length];
     setColorMap(prev => ({ ...prev, [firstWord]: newColor }));
     return newColor;
   };
 
-  // Helper: Monday date for a given week offset (relative to current week)
-  const getMondayForOffset = useCallback((offset) => {
-    const today = new Date();
-    const monday = new Date(today);
-    monday.setDate(today.getDate() - today.getDay() + 1 + (offset * 7));
-    monday.setHours(0, 0, 0, 0);
-    return monday;
-  }, []);
-
   // Helper: Determine the last occurrence date for a task id across all scheduled instances
   const getLastOccurrenceDateForTask = useCallback((taskId) => {
-    const occ = scheduledTasks.filter(t => t.id === taskId);
+    const occ = scheduledTasks.filter(t => t.id === taskId && t.date && fromYMD(t.date));
     if (occ.length === 0) return new Date();
     const last = occ.reduce((a, b) => {
-      if ((a.weekOffset || 0) !== (b.weekOffset || 0)) return (a.weekOffset || 0) > (b.weekOffset || 0) ? a : b;
-      if ((a.day || 0) !== (b.day || 0)) return (a.day || 0) > (b.day || 0) ? a : b;
-      return (a.startTime || 0) >= (b.startTime || 0) ? a : b;
+      const da = fromYMD(a.date);
+      const db = fromYMD(b.date);
+      if (!da && !db) return a;
+      if (!da) return b;
+      if (!db) return a;
+      if (da.getTime() !== db.getTime()) return da > db ? a : b;
+      const aStart = a.startMinutes || 0;
+      const bStart = b.startMinutes || 0;
+      return aStart >= bStart ? a : b;
     });
-    const monday = getMondayForOffset(last.weekOffset || 0);
-    const date = new Date(monday);
-    date.setDate(monday.getDate() + (last.day || 0));
-    // Set to noon to avoid timezone boundary issues
+    const date = fromYMD(last.date) || new Date();
     date.setHours(12, 0, 0, 0);
     return date;
-  }, [scheduledTasks, getMondayForOffset]);
+  }, [scheduledTasks]);
 
   // Compute daily completion counts for the displayed week
   const getDailyCompletionCounts = useCallback(() => {
@@ -1527,7 +1787,6 @@ const TodoCalendarApp = () => {
   return (
     <div className={`h-screen bg-gray-50 ${isMobile ? 'p-2' : 'p-4'} flex flex-col`}>
       <div className="w-full mx-auto flex-1 flex flex-col min-h-0">
-        
         {/* Status Bar */}
         <div className="bg-white rounded-lg shadow-md p-4 mb-4">
           <div className="flex justify-between items-start">
@@ -1540,9 +1799,9 @@ const TodoCalendarApp = () => {
                 <Menu className="w-5 h-5" />
               </button>
             )}
-            
+
             <div className={`flex ${isMobile ? 'flex-col gap-2' : 'gap-4'} flex-1`}>
-              <div 
+              <div
                 className={`bg-blue-50 rounded-lg p-3 ${isMobile ? 'w-full' : 'flex-1'} cursor-pointer hover:bg-blue-100 transition-colors`}
                 onDoubleClick={() => {
                   if (currentTasks.length > 0) {
@@ -1554,9 +1813,9 @@ const TodoCalendarApp = () => {
                   <div className="flex-1">
                     <div className="text-sm text-blue-600 font-semibold mb-1">Current Task</div>
                     <div className={`${isMobile ? 'text-base' : 'text-lg'} font-bold text-blue-900`}>
-                      {currentTasks.length === 0 ? 'No active task' : 
-                       currentTasks.length === 1 ? currentTasks[0].name :
-                       `${currentTasks[0].name} + ${currentTasks.length - 1} more`}
+                      {currentTasks.length === 0 ? 'No active task' :
+                        currentTasks.length === 1 ? currentTasks[0].name :
+                          `${currentTasks[0].name} + ${currentTasks.length - 1} more`}
                     </div>
                     {timeRemaining && (
                       <div className="text-sm text-blue-600 mt-1 font-medium">
@@ -1571,10 +1830,10 @@ const TodoCalendarApp = () => {
                   )}
                 </div>
               </div>
-              
+
               {/* Hide next task on very small screens */}
               {(!isMobile || window.innerWidth > 480) && (
-                <div 
+                <div
                   className={`bg-green-50 rounded-lg p-3 ${isMobile ? 'w-full' : 'flex-1'} cursor-pointer hover:bg-green-100 transition-colors`}
                   onDoubleClick={() => {
                     if (nextTask) {
@@ -1598,7 +1857,7 @@ const TodoCalendarApp = () => {
                 </div>
               )}
             </div>
-            
+
             <div className={`flex ${isMobile ? 'flex-row gap-2' : 'flex-col gap-2'} ml-4`}>
               <button
                 onClick={() => setChimeEnabled(!chimeEnabled)}
@@ -1618,9 +1877,9 @@ const TodoCalendarApp = () => {
                 onClick={() => setShowDebugModal(true)}
                 className={`p-2 bg-white border-2 rounded-lg hover:bg-gray-50 flex items-center ${isMobile ? 'h-10 w-10' : 'h-8 w-8'} justify-center`}
                 style={{
-                  borderColor: !isOnline ? '#EF4444' : 
-                              saveStatus === 'saving' ? '#F59E0B' : 
-                              saveStatus === 'saved' ? '#10B981' : '#EF4444'
+                  borderColor: !isOnline ? '#EF4444' :
+                    saveStatus === 'saving' ? '#F59E0B' :
+                      saveStatus === 'saved' ? '#10B981' : '#EF4444'
                 }}
                 title="Debug Information"
               >
@@ -1632,7 +1891,7 @@ const TodoCalendarApp = () => {
 
         {/* Mobile Sidebar Overlay */}
         {isMobile && sidebarOpen && (
-          <div 
+          <div
             className="fixed inset-0 bg-black bg-opacity-50 z-40"
             onClick={() => setSidebarOpen(false)}
           />
@@ -1640,11 +1899,11 @@ const TodoCalendarApp = () => {
 
         <div className={`${isMobile ? 'flex flex-col' : 'grid grid-cols-12 gap-6'} flex-1 min-h-0`}>
           {/* Left Sidebar - Unscheduled Tasks */}
-          <div className={`${isMobile ? 
-            `fixed inset-y-0 left-0 z-50 w-80 bg-white shadow-lg transform transition-transform duration-300 ease-in-out ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}` : 
+          <div className={`${isMobile ?
+            `fixed inset-y-0 left-0 z-50 w-80 bg-white shadow-lg transform transition-transform duration-300 ease-in-out ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}` :
             'col-span-3'
-          } flex flex-col gap-4 min-h-0 ${isMobile ? 'pt-4' : ''}`}>
-            <div 
+            } flex flex-col gap-4 min-h-0 ${isMobile ? 'pt-4' : ''}`}>
+            <div
               className="bg-white rounded-lg shadow-md p-4 flex-1 flex flex-col min-h-0"
               onDragOver={handleDragOver}
               onDrop={handleDropToUnscheduled}
@@ -1676,7 +1935,6 @@ const TodoCalendarApp = () => {
                     key={task.id}
                     draggable
                     onDragStart={(e) => {
-                      // Set both drag types - let drop handlers determine which to use
                       setDraggedTaskIndex(index);
                       handleEnhancedDragStart(e, task, 'unscheduled');
                     }}
@@ -1687,11 +1945,11 @@ const TodoCalendarApp = () => {
                     onTouchEnd={(e) => handleTouchEnd(e, task, 'unscheduled')}
                     onDoubleClick={() => handleEditItem(task)}
                     className={`p-3 rounded-lg hover:shadow-lg transition-shadow cursor-move ${isMobile ? 'select-none touch-none' : ''}`}
-                    style={{ 
-                      backgroundColor: task.color + '20', 
-                      borderLeft: `4px solid ${task.color}`,
-                      ...(isMobile ? { 
-                        userSelect: 'none', 
+                    style={{
+                      backgroundColor: (task.color || '#3B82F6') + '20',
+                      borderLeft: `4px solid ${task.color || '#3B82F6'}`,
+                      ...(isMobile ? {
+                        userSelect: 'none',
                         WebkitUserSelect: 'none',
                         touchAction: 'none',
                         WebkitTouchCallout: 'none'
@@ -1704,7 +1962,7 @@ const TodoCalendarApp = () => {
                         <div className="text-sm text-gray-600 flex items-center mt-1 gap-2">
                           <div className="flex items-center">
                             <Clock className="w-3 h-3 mr-1" />
-                            {task.duration} min
+                            {task.durationMinutes ?? task.duration} min
                           </div>
                           {task.notes && (
                             <FileText className="w-3 h-3 text-gray-400" />
@@ -1724,7 +1982,7 @@ const TodoCalendarApp = () => {
             </div>
 
             {/* Completed Tasks */}
-            <div 
+            <div
               className="bg-white rounded-lg shadow-md p-4 max-h-64 flex flex-col"
               onDragOver={handleDragOver}
               onDrop={handleDropToCompleted}
@@ -1751,7 +2009,7 @@ const TodoCalendarApp = () => {
                     <div className="flex justify-between items-center">
                       <div>
                         <div className="font-medium text-gray-700 line-through">{task.name}</div>
-                        <div className="text-sm text-gray-500">{task.duration} min</div>
+                        <div className="text-sm text-gray-500">{task.durationMinutes ?? task.duration} min</div>
                       </div>
                       <div className="flex items-center gap-1">
                         <button
@@ -1835,18 +2093,18 @@ const TodoCalendarApp = () => {
                     </button>
                   </div>
                 </div>
-                
+
                 {viewMode === 'day' && currentDate && (
                   <div className={`${isMobile ? 'text-center text-base' : 'text-lg'} font-medium text-gray-700`}>
-                    {currentDate.toLocaleDateString('en-US', { 
-                      weekday: 'long', 
-                      month: 'long', 
-                      day: 'numeric' 
+                    {currentDate.toLocaleDateString('en-US', {
+                      weekday: 'long',
+                      month: 'long',
+                      day: 'numeric'
                     })}{' '}
                     ({dailyCompletionCounts[selectedDay]}✓)
                   </div>
                 )}
-                
+
                 <button
                   onClick={() => setShowMeetingModal(true)}
                   className={`${isMobile ? 'px-3 py-2 text-sm' : 'px-4 py-2'} bg-red-500 text-white rounded-lg hover:bg-red-600 flex items-center gap-2 ${isMobile ? 'self-end' : ''}`}
@@ -1858,8 +2116,8 @@ const TodoCalendarApp = () => {
               <div className={`${isMobile ? 'text-xs' : 'text-xs'} text-gray-500 mb-2`}>
                 {isMobile ? 'Tap to edit • Long press to drag • Swipe left/right to navigate days' : 'Double-click to add meeting • Drag to reschedule • Drag bottom edge to resize • Double-click to edit'}
               </div>
-              
-              <div 
+
+              <div
                 className="flex-1 overflow-auto"
                 onTouchStart={handleSwipeStart}
                 onTouchMove={handleSwipeMove}
@@ -1884,7 +2142,7 @@ const TodoCalendarApp = () => {
                       </div>
                     ))
                   )}
-                  
+
                   {(viewMode === 'day' ? hours : weekHours).map(hour => (
                     <React.Fragment key={hour}>
                       <div className="text-sm text-gray-600 p-2 border-t border-gray-200">
@@ -1892,7 +2150,7 @@ const TodoCalendarApp = () => {
                       </div>
                       {(viewMode === 'day' ? [selectedDay] : [0, 1, 2, 3, 4]).map((dayIndex) => {
                         const dayItems = getOverlappingItems(dayIndex);
-                        
+
                         return (
                           <div
                             key={`${hour}-${dayIndex}`}
@@ -1900,7 +2158,7 @@ const TodoCalendarApp = () => {
                             data-day={dayIndex}
                             data-hour={hour}
                             className={`border-t border-l border-gray-200 relative hover:bg-gray-50 ${isTimeSlotPast(dayIndex, hour) ? 'bg-gray-100' : ''}`}
-                            style={{ 
+                            style={{
                               height: `${pixelsPerHour}px`,
                               ...(isMobile ? { touchAction: 'pan-y', userSelect: 'none', WebkitUserSelect: 'none' } : {})
                             }}
@@ -1915,19 +2173,19 @@ const TodoCalendarApp = () => {
                               <div className="border-t border-gray-100 absolute w-full" style={{ top: `${pixelsPerHour / 2}px` }}></div>
                               <div className="border-t border-gray-100 absolute w-full" style={{ top: `${3 * pixelsPerHour / 4}px` }}></div>
                             </div>
-                            
+
                             {/* Current time line */}
                             {currentTimePos && currentTimePos.day === dayIndex && hour === Math.floor(currentTime.getHours()) && (
-                              <div 
+                              <div
                                 className="absolute left-0 right-0 border-t-2 border-blue-500 z-30 pointer-events-none"
-                                style={{ 
+                                style={{
                                   top: `${(currentTime.getMinutes() / 60) * pixelsPerHour}px`
                                 }}
                               >
                                 <div className="absolute -left-1 -top-1 w-2 h-2 bg-blue-500 rounded-full"></div>
                               </div>
                             )}
-                            
+
                             {/* Meetings and Tasks */}
                             {dayItems
                               .filter(item => {
@@ -1935,15 +2193,15 @@ const TodoCalendarApp = () => {
                                 return itemHour === hour;
                               })
                               .map(item => {
-                                const isMeeting = item.id.toString().startsWith('m');
+                                const isMeeting = (item.id || '').toString().startsWith('m');
                                 const minuteOffset = (item.startTime - Math.floor(item.startTime)) * pixelsPerHour;
                                 const width = item.totalColumns ? `${100 / item.totalColumns}%` : '100%';
                                 const left = item.column ? `${(100 / item.totalColumns) * item.column}%` : '0';
-                                const minHeight = (item.duration / 60) * pixelsPerHour; // Use actual duration height
-                                
+                                const minHeight = (item.duration / 60) * pixelsPerHour;
+
                                 return (
                                   <div
-                                    key={`${item.occurrenceId || item.id}-${item.instanceKey || ''}`}
+                                    key={`${item.occurrenceId || item.id}-${item.instanceKey || ''}-${item.date || ''}`}
                                     draggable
                                     onDragStart={(e) => handleEnhancedDragStart(e, item, isMeeting ? 'meeting' : 'scheduled')}
                                     onTouchStart={(e) => handleTouchStart(e, item, isMeeting ? 'meeting' : 'scheduled')}
@@ -1959,7 +2217,7 @@ const TodoCalendarApp = () => {
                                       left,
                                       width,
                                       height: `${minHeight}px`,
-                                      backgroundColor: item.color + 'DD',
+                                      backgroundColor: (item.color || '#374151') + 'DD',
                                       zIndex: 50 + (item.column || 0),
                                       ...(isMobile ? {
                                         userSelect: 'none',
@@ -1970,7 +2228,6 @@ const TodoCalendarApp = () => {
                                     }}
                                   >
                                     <div className="text-white text-xs font-semibold h-full relative flex flex-col">
-                                      {/* Task content - full width */}
                                       <div className="flex-1 overflow-hidden">
                                         <div className={`break-words leading-tight ${struckThroughTasks.has(item.id) ? 'line-through' : ''}`}>
                                           {item.name}
@@ -1985,8 +2242,8 @@ const TodoCalendarApp = () => {
                                           <FileText className="w-3 h-3 mt-1 opacity-70" />
                                         )}
                                       </div>
-                                      
-                                      {/* Floating action buttons - overlay on top right */}
+
+                                      {/* Floating action buttons */}
                                       <div className="absolute top-1 right-1 flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity bg-black bg-opacity-50 rounded p-0.5">
                                         {!isMeeting && (
                                           <>
@@ -2049,7 +2306,6 @@ const TodoCalendarApp = () => {
                                           </button>
                                         )}
                                       </div>
-                                      {/* Resize handle */}
                                       <div
                                         className="absolute bottom-0 left-0 right-0 h-2 cursor-ns-resize hover:bg-white hover:bg-opacity-20 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
                                         onMouseDown={(e) => handleResizeStart(e, item, isMeeting ? 'meeting' : 'task')}
@@ -2071,10 +2327,9 @@ const TodoCalendarApp = () => {
           </div>
         </div>
 
-
         {/* Delete Confirmation Dialog */}
         {deleteConfirm && (
-          <div 
+          <div
             className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100]"
             onClick={(e) => {
               if (e.target === e.currentTarget) {
@@ -2111,7 +2366,7 @@ const TodoCalendarApp = () => {
 
         {/* Edit Item Modal */}
         {editingItem && (
-          <div 
+          <div
             className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100]"
             onClick={(e) => {
               if (e.target === e.currentTarget) {
@@ -2121,7 +2376,7 @@ const TodoCalendarApp = () => {
           >
             <div className="bg-white rounded-lg p-6 w-96 max-h-[80vh] overflow-y-auto">
               <h3 className="text-xl font-semibold mb-4">
-                Edit {editingItem.id.toString().startsWith('m') ? 'Meeting' : 'Task'}
+                Edit {(editingItem.id || '').toString().startsWith('m') ? 'Meeting' : 'Task'}
               </h3>
               <input
                 type="text"
@@ -2151,7 +2406,7 @@ const TodoCalendarApp = () => {
                 className="w-full p-2 border rounded mb-4 h-24"
                 placeholder="Add notes..."
               />
-              {!editingItem.id.toString().startsWith('m') && (
+              {!(editingItem.id || '').toString().startsWith('m') && (
                 <>
                   <label className="block text-sm font-medium text-gray-700 mb-2">Color</label>
                   <div className="flex gap-2 mb-4">
@@ -2169,7 +2424,7 @@ const TodoCalendarApp = () => {
               )}
               <div className="flex justify-between">
                 <div className="flex gap-2">
-                  {!editingItem.id.toString().startsWith('m') && (
+                  {!(editingItem.id || '').toString().startsWith('m') && (
                     <button
                       onClick={handleCompleteFromEdit}
                       className="p-2 bg-green-500 text-white rounded hover:bg-green-600"
@@ -2204,7 +2459,7 @@ const TodoCalendarApp = () => {
             </div>
           </div>
         )}
-
+        
         {/* Add Task Modal */}
         {showTaskModal && (
           <div 
